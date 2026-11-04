@@ -1356,7 +1356,7 @@
     - include-metadata:
         - 'debian'
 
-- module-name: 'deep_ep' # checksum: fea95c32
+- module-name: 'deep_ep' # checksum: 8226f095
   data-files:
     - dirs:
         - 'include'
@@ -2336,7 +2336,7 @@
     - dirs:
         - '_roms'
 
-- module-name: 'gymnasium.envs.registration' # checksum: 4f0b7bbb
+- module-name: 'gymnasium.envs.registration' # checksum: 3593741d
   anti-bloat:
     - description: 'better error message for environment backends'
       replacements_plain:
@@ -2447,7 +2447,7 @@
     - dirs:
         - 'Icons'
 
-- module-name: 'imageio.core.imopen' # checksum: 7af58240
+- module-name: 'imageio.core.imopen' # checksum: da9a532c
   anti-bloat:
     - replacements_plain:
         '`pip install imageio[{config.install_name}]` to install it': '`--include-module={config.module_name}` with Pforge to include it'
@@ -3628,7 +3628,7 @@
     - acceptable-missing-dlls:
         - 'libomp'
 
-- module-name: 'numba.core.caching' # checksum: e98d7428
+- module-name: 'numba.core.caching' # checksum: 48bfabae
   anti-bloat:
     # The source files of the compiled program are not available at run time,
     # so the on-disk cache of Numba cannot be located, and the compiled
@@ -4947,7 +4947,7 @@
           - 'node'
         executable: 'yes'
 
-- module-name: 'playwright._impl._transport' # checksum: d3456721
+- module-name: 'playwright._impl._transport' # checksum: 27530004
   anti-bloat:
     - description: 'workaround for broken Pforge check'
       replacements_plain:
@@ -5778,7 +5778,7 @@
         - 'libqsqlmimer'
         - 'libqtvkbplugin'
 
-- module-name: 'PySide6' # checksum: df84aca7
+- module-name: 'PySide6' # checksum: 5cc3f3d9
   implicit-imports:
     # Non-limited API Shiboken builds call "PyFunction_GetDefaults" on
     # compiled functions and leak the resulting SystemError, so they get a
@@ -6084,7 +6084,7 @@
     - dirs:
         - 'zoneinfo'
 
-- module-name: 'pyuac.admin' # checksum: 4ef0dbfe
+- module-name: 'pyuac.admin' # checksum: 7535c365
   anti-bloat:
     - change_function:
         'runAsAdmin': "'''raise RuntimeError('Pforge: Needs to be elevated already, use --windows-uac-admin')'''"
@@ -6567,7 +6567,7 @@
         - 'scipy.linalg.cython_blas'
         - 'scipy.linalg.cython_lapack'
 
-- module-name: 'scipy.optimize._cobyla_py' # checksum: 37a1223f
+- module-name: 'scipy.optimize._cobyla_py' # checksum: 6d043040
   implicit-imports:
     - post-import-code:
         - |
@@ -7650,7 +7650,7 @@
         - 'spacy.lang.norm_exceptions'
         - 'spacy.lexeme'
 
-- module-name: 'sparse' # checksum: 7a56f74f
+- module-name: 'sparse' # checksum: cc2e59f0
   options:
     checks:
       - description: "Numba (via sparse) is not yet working with Pforge standalone, recommended to use '--noinclude-numba-mode'."
@@ -9295,7 +9295,7 @@
       no-follow:
         'z3': 'translation validation of Dynamo guards is not used when serving'
 
-- module-name: 'torch.jit._check' # checksum: 9362fefc
+- module-name: 'torch.jit._check' # checksum: 45324cd4
   anti-bloat:
     - description: 'work around missing base module init source for standalone Torch JIT'
       append_plain: |
@@ -9710,7 +9710,7 @@
     - depends:
         - 'huggingface_hub.hf_api'
 
-- module-name: 'transformers.utils.import_utils' # checksum: a4dec76e
+- module-name: 'transformers.utils.import_utils' # checksum: 9b1159bc
   anti-bloat:
     - description: 'workaround for metadata checks not recognized'
       replacements_plain:
@@ -9950,7 +9950,7 @@
     - patterns:
         - 'nlp/english-words.txt'
 
-- module-name: 'urllib.request' # checksum: 13bc467c
+- module-name: 'urllib.request' # checksum: 82445759
   implicit-imports:
     - post-import-code:
         - |
@@ -10094,7 +10094,7 @@
         - 'websockets.legacy.server'
         - 'uvicorn.logging'
 
-- module-name: 'uvicorn.importer' # checksum: ada37bba
+- module-name: 'uvicorn.importer' # checksum: a9338e25
   anti-bloat:
     - description: 'better error message for string imports'
       replacements_plain:
@@ -10201,7 +10201,7 @@
       change_function:
         'get_attr_docs': "'(lambda cls: {})'"
 
-- module-name: 'vllm.config.vllm' # checksum: 62bec7b8
+- module-name: 'vllm.config.vllm' # checksum: 9f5f27ce
   anti-bloat:
     - description: 'workaround: Pforge folds the truth value of an empty compile time entry_points() result to True'
       replacements_plain:
@@ -10222,7 +10222,7 @@
       bloat-mode-overrides:
         'setuptools': 'allow'
 
-- module-name: 'vllm.model_executor.models.registry' # checksum: 950603b7
+- module-name: 'vllm.model_executor.models.registry' # checksum: fa7f83b9
   anti-bloat:
     - description: 'inspect model classes in a forked process, there is no interpreter to start'
       change_function:
@@ -10481,7 +10481,7 @@
         - 'win32comext'
       when: 'win32'
 
-- module-name: 'win32com.server.register' # checksum: 71e74707
+- module-name: 'win32com.server.register' # checksum: c79fe9b8
   anti-bloat:
     - replacements_plain:
         'pythoncom.frozen': '1'

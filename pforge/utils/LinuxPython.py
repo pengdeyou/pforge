@@ -32,7 +32,8 @@ import os
 import re
 
 from pforge.PythonVersions import python_version_full_str
-from pforge.utils.FileOperations import getNormalizedPath, getNormalizedPathJoin
+
+from .FileOperations import getNormalizedPath, getNormalizedPathJoin
 
 
 def getLinuxPythonDirectory():
@@ -105,8 +106,7 @@ def isLinuxPythonPrefixComplete(python_prefix):
         return False
 
     has_python = any(
-        os.path.isfile(os.path.join(bin_dir, name))
-        for name in ("python3", "python")
+        os.path.isfile(os.path.join(bin_dir, name)) for name in ("python3", "python")
     )
 
     if not has_python:
@@ -245,7 +245,11 @@ def getLinuxPythonSysConfig(python_prefix):
         return None
 
     try:
-        return eval(match.group(1), {"__builtins__": {}}, {})  # pylint: disable=eval-used
+        # The content is a dictionary of literals only, it comes from
+        # the target Python's own build configuration.
+        return eval(  # pylint: disable=eval-used
+            match.group(1), {"__builtins__": {}}, {}
+        )
     except Exception:  # pylint: disable=broad-except
         return None
 
@@ -269,7 +273,7 @@ def getLinuxPythonVersionInfo(python_prefix):
 
 def getLinuxPythonCacheDirectory():
     """Get the directory where downloaded Linux Python data is cached."""
-    from pforge.utils.AppDirs import getCacheDir
+    from .AppDirs import getCacheDir
 
     return getNormalizedPath(getCacheDir("pforge-linux-python", create=True))
 

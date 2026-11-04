@@ -179,14 +179,14 @@ def _getWindowsPythonRequirement():
 
 def _getWasiPythonRequirement():
     from pforge.options.Options import getWasiPythonPrefixPath
+    from pforge.PythonVersions import python_version_str
+    from pforge.utils.Download import getDownloadCacheDir
+    from pforge.utils.FileOperations import getNormalizedPathJoin
 
     # The prefix is only inspected, it is not created here, since that
     # would ask the user for a download while merely listing the
     # targets.
     from pforge.utils.WasiPython import _isWasiPythonPrefixComplete
-    from pforge.utils.Download import getDownloadCacheDir
-    from pforge.utils.FileOperations import getNormalizedPathJoin
-    from pforge.PythonVersions import python_version_str
 
     prefix = getWasiPythonPrefixPath()
 
@@ -280,7 +280,12 @@ def _getTargetMatrix():
         TargetDescription(
             name="native",
             description="the platform this compiler runs on",
-            supported_hosts=("windows-x86_64", "macos-x86_64", "macos-arm64", "linux-x86_64"),
+            supported_hosts=(
+                "windows-x86_64",
+                "macos-x86_64",
+                "macos-arm64",
+                "linux-x86_64",
+            ),
             requirements=(),
         )
     )
@@ -296,8 +301,7 @@ def _getTargetMatrix():
                 "linux-x86_64",
             ),
             requirements=(_getWasiPythonRequirement(), _getWasiSDKRequirement()),
-            notes="The target Python and the WASI SDK are downloaded on "
-            "demand.",
+            notes="The target Python and the WASI SDK are downloaded on " "demand.",
         )
     )
 
@@ -307,8 +311,7 @@ def _getTargetMatrix():
             description="32-bit Windows, using the mingw32 target triple",
             supported_hosts=("windows-x86_64", "linux-x86_64"),
             requirements=(_getWindowsPythonRequirement(), _getZigRequirement()),
-            notes="On non-Windows hosts the zig compiler is used as the C "
-            "compiler.",
+            notes="On non-Windows hosts the zig compiler is used as the C " "compiler.",
         )
     )
 
@@ -396,7 +399,9 @@ def formatTargetReport(target_names=None):
             lines.append("    Status: missing prerequisites")
             for requirement, detail in missing:
                 lines.append("      - %s: %s" % (requirement.getName(), detail))
-                lines.append("        How to satisfy: %s" % requirement.getHowToSatisfy())
+                lines.append(
+                    "        How to satisfy: %s" % requirement.getHowToSatisfy()
+                )
 
         notes = target.getNotes()
 

@@ -15,12 +15,9 @@ import tarfile
 
 from pforge.PythonVersions import python_version_full_str
 from pforge.Tracing import general
-from pforge.utils.FileOperations import (
-    getNormalizedPathJoin,
-    makePath,
-    removeDirectory,
-)
-from pforge.utils.LinuxPython import (
+
+from .FileOperations import getNormalizedPathJoin, makePath, removeDirectory
+from .LinuxPython import (
     getLinuxPythonDirectory,
     getLinuxTargetDirectoryName,
     isLinuxPythonPrefixComplete,
@@ -42,7 +39,7 @@ def getPBSReleaseTag():
     Returns:
         str or None
     """
-    from pforge.utils.Download import withUrlOpen
+    from .Download import withUrlOpen
 
     try:
         with withUrlOpen(
@@ -106,7 +103,7 @@ def getAvailablePythonVersions(release_tag):
     Returns:
         list of str, the Python versions available for Linux x86_64
     """
-    from pforge.utils.Download import withUrlOpen
+    from .Download import withUrlOpen
 
     minor_version = ".".join(python_version_full_str.split(".")[:2])
 
@@ -215,14 +212,14 @@ def prefetchLinuxPython(target_arch="x86_64", python_version=None):
         str, the prefix that was created
     """
     from pforge.options.Options import assumeYesForDownloads
-    from pforge.utils.Download import getCachedDownload, getDownloadMode
+
+    from .Download import getCachedDownload, getDownloadMode
 
     release_tag = getPBSReleaseTag()
 
     if release_tag is None:
         general.sysexit(
-            "Error, could not determine the newest python-build-standalone "
-            "release."
+            "Error, could not determine the newest python-build-standalone release."
         )
 
     if python_version is None:
@@ -235,9 +232,7 @@ def prefetchLinuxPython(target_arch="x86_64", python_version=None):
     )
 
     if url is None:
-        general.sysexit(
-            "Error, unsupported target architecture '%s'." % target_arch
-        )
+        general.sysexit("Error, unsupported target architecture '%s'." % target_arch)
 
     general.info(
         "Downloading the Linux Python for '%s' from '%s'." % (target_arch, url)
@@ -265,7 +260,7 @@ def prefetchLinuxPython(target_arch="x86_64", python_version=None):
 
     # The cached download is in the download cache, it needs to be
     # extracted into the target directory.
-    from pforge.utils.Download import getDownloadCacheDir
+    from .Download import getDownloadCacheDir
 
     archive = getNormalizedPathJoin(
         getDownloadCacheDir(),
@@ -308,7 +303,7 @@ def _findCachedArchive(target_arch):
     Returns:
         str or None
     """
-    from pforge.utils.Download import getDownloadCacheDir
+    from .Download import getDownloadCacheDir
 
     cache_dir = getNormalizedPathJoin(
         getDownloadCacheDir(), "linux-python-%s.tar.gz" % target_arch

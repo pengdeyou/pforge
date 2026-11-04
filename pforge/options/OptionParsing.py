@@ -2739,8 +2739,8 @@ target_group.add_option(
 Download the Linux Python build into the 'python' directory next to the
 compiler source, so that Linux binaries can be built on this host. Only the
 newest version is kept. Then exit.
-Default off.""",    require_compiling=False,
-
+Default off.""",
+    require_compiling=False,
 )
 
 target_group.add_option(
@@ -2751,8 +2751,8 @@ target_group.add_option(
     help="""\
 List the cross compilation targets that are known to Pforge, together with
 their prerequisites and whether they are met on this host, then exit.
-Default off.""",    require_compiling=False,
-
+Default off.""",
+    require_compiling=False,
 )
 
 del target_group

@@ -39,14 +39,15 @@ import re
 from setuptools import Distribution, setup
 from setuptools.command import easy_install
 
+from pforge.PythonFlavors import isMSYS2MingwPython
+from pforge.utils.Utils import isMacOS
+from pforge.Version import getPforgeVersion
+
 try:
     from wheel.bdist_wheel import bdist_wheel as _bdist_wheel
 except ImportError:
     _bdist_wheel = None
 
-from pforge.PythonFlavors import isMSYS2MingwPython
-from pforge.utils.Utils import isMacOS
-from pforge.Version import getPforgeVersion
 
 version = getPforgeVersion()
 
@@ -442,6 +443,7 @@ package_requires = []
 if (3, 7) <= sys.version_info < (3, 14):
     onefile_requires.append("zstandard >= 0.15")
 
+
 class _PurePythonBdistWheel(_bdist_wheel):
     """Force a pure Python wheel.
 
@@ -540,9 +542,7 @@ Python compiler with full language support and CPython compatibility""",
     # the platform it was built on, which PyPI does not accept.
     zip_safe=True,
     cmdclass=(
-        {"bdist_wheel": _PurePythonBdistWheel}
-        if _bdist_wheel is not None
-        else None
+        {"bdist_wheel": _PurePythonBdistWheel} if _bdist_wheel is not None else None
     ),
     scripts=scripts,
     data_files=data_files,

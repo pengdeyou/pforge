@@ -26,7 +26,8 @@ def measureOne(python_path, package_name):
         "import sys; sys.path.insert(0, %r); "
         "sys.argv=['x', '--version']; "
         "from %s.__main__ import main; "
-        "exec('try:\\n main()\\nexcept BaseException:\\n pass')" % (
+        "exec('try:\\n main()\\nexcept BaseException:\\n pass')"
+        % (
             python_path,
             package_name,
         )

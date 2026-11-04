@@ -56,7 +56,7 @@
       replacements_plain:
         "getattr(sys, 'frozen', False)": 'True'
 
-- module-name: 'tkinter' # checksum: 481f7b98
+- module-name: 'tkinter' # checksum: 713b0991
   anti-bloat:
     - description: 'enhanced tk-inter in case of missing tcl'
       context:

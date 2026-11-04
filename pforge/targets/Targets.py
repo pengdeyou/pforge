@@ -245,13 +245,9 @@ def setTargetSpecification(target_name):
     elif target_name in ("x86_64-linux-gnu", "aarch64-linux-gnu"):
         from .TargetLinux import TargetLinux
 
-        target_arch = (
-            "arm64" if target_name.startswith("aarch64") else "x86_64"
-        )
+        target_arch = "arm64" if target_name.startswith("aarch64") else "x86_64"
 
-        _target_specification = TargetLinux(
-            name=target_name, target_arch=target_arch
-        )
+        _target_specification = TargetLinux(name=target_name, target_arch=target_arch)
     else:
         raise ValueError("Unsupported target %r" % target_name)
 

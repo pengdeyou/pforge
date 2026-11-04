@@ -262,7 +262,7 @@
         'test': "'(lambda: None)'"
         'help': "'(lambda: None)'"
 
-- module-name: 'pickle' # checksum: a8cca0dd
+- module-name: 'pickle' # checksum: 6093eb77
   anti-bloat:
     - description: 'remove module ability to run as a binary'
       change_function:

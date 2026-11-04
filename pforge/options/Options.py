@@ -358,14 +358,15 @@ Error, '%s' value '%s' is not a legal filename: %s%s."""
         )
 
 
-
 def _doPrefetchPython():
     """Download the Linux Python into the "python" directory."""
     from pforge.utils.PythonPrefetch import prefetchLinuxPython
 
     prefetchLinuxPython(target_arch="x86_64")
 
-    options_logger.sysexit("The Linux Python is now available.")
+    # This is a successful action, not an error, so it exits with a
+    # zero status code, so that scripts can rely on it.
+    sys.exit(0)
 
 
 def _doListTargets():
@@ -374,7 +375,9 @@ def _doListTargets():
 
     print(formatTargetReport())
 
-    options_logger.sysexit("")
+    # This is a successful action, not an error, so it exits with a
+    # zero status code, so that scripts can rely on it.
+    sys.exit(0)
 
 
 def _applyTargetSpecification(target_desc):

@@ -62,9 +62,7 @@ class TargetLinux(TargetBase):
             python_prefix = getLinuxPythonPrefixPath()
 
             if python_prefix is None:
-                python_prefix = getLocalLinuxPythonPrefix(
-                    target_arch=self.target_arch
-                )
+                python_prefix = getLocalLinuxPythonPrefix(target_arch=self.target_arch)
 
             self._python_prefix = python_prefix
 
@@ -167,8 +165,7 @@ Error, the Linux target needs a Linux Python to build against. Create the \
 
         if not os.path.isdir(python_prefix):
             return general.sysexit(
-                "Error, the Linux Python prefix '%s' does not exist."
-                % python_prefix
+                "Error, the Linux Python prefix '%s' does not exist." % python_prefix
             )
 
         include_path = getLinuxPythonIncludePath(python_prefix)

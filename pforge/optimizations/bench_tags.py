@@ -12,7 +12,7 @@ Run it with:
 
 import timeit
 
-from pforge.optimizations.Tags import TagSet, allowed_tags
+from .Tags import TagSet, allowed_tags
 
 
 def makeSignal():

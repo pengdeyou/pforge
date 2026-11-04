@@ -8,7 +8,7 @@
 #include "pforge/prelude.h"
 #endif
 
-// spell-checker: ignore Pforge_gc_decref,Pforge_visit_decref,PYMEM_DOMAIN,QSBR
+// spell-checker: ignore PYMEM_DOMAIN,Pforge_gc_decref,Pforge_visit_decref,QSBR
 // spell-checker: ignore _PyObject_GET_WEAKREFS_LISTPTR,finalizers,gcstate,objmalloc,qbsr
 // spell-checker: ignore sisnsn,stoptheworld,uncollectable,wrasgc,wrcb,wrlist
 
