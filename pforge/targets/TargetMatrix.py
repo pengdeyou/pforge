@@ -178,20 +178,30 @@ def _getWindowsPythonRequirement():
 
 
 def _getWasiPythonRequirement():
-    from pforge.utils.WasiPython import getWasiPythonPrefix
+    from pforge.options.Options import getWasiPythonPrefixPath
 
-    try:
-        prefix = getWasiPythonPrefix()
-    except Exception as e:
-        return PathRequirement(
-            name="wasi-python",
-            description="a WASI CPython installation, used as the target Python",
-            how_to_satisfy="Let Pforge download a matching prebuilt WASI Python "
-            "by omitting '--wasi-python-prefix', or point it at an existing "
-            "installation with '--wasi-python-prefix=DIRECTORY'.",
-            path=None,
-            want_directory=True,
+    # The prefix is only inspected, it is not created here, since that
+    # would ask the user for a download while merely listing the
+    # targets.
+    from pforge.utils.WasiPython import _isWasiPythonPrefixComplete
+    from pforge.utils.Download import getDownloadCacheDir
+    from pforge.utils.FileOperations import getNormalizedPathJoin
+    from pforge.PythonVersions import python_version_str
+
+    prefix = getWasiPythonPrefixPath()
+
+    if prefix is None:
+        # It is downloaded on demand, so it is not there yet, unless a
+        # previous run has already cached it.
+        cache_prefix = getNormalizedPathJoin(
+            getDownloadCacheDir(),
+            "wasi-python",
+            python_version_str,
+            "prefix",
         )
+
+        if _isWasiPythonPrefixComplete(cache_prefix, python_version_str):
+            prefix = cache_prefix
 
     return PathRequirement(
         name="wasi-python",
@@ -237,11 +247,13 @@ def _getLinuxPythonRequirement():
 
 
 def _getWasiSDKRequirement():
-    from pforge.utils.WasiSDK import getWasiSDKPath
+    # Only the user provided path is inspected, the download is not
+    # triggered while merely listing the targets.
+    from pforge.options.Options import getWasiSDKPath
 
     try:
         path = getWasiSDKPath()
-    except Exception:
+    except Exception:  # pylint: disable=broad-except
         path = None
 
     return PathRequirement(

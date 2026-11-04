@@ -10,14 +10,12 @@ the compiler, and older ones would only take up space.
 """
 
 import os
-import re
 import shutil
 import tarfile
 
-from pforge.PythonVersions import python_version_full_str, python_version_str
+from pforge.PythonVersions import python_version_full_str
 from pforge.Tracing import general
 from pforge.utils.FileOperations import (
-    getNormalizedPath,
     getNormalizedPathJoin,
     makePath,
     removeDirectory,
@@ -54,7 +52,7 @@ def getPBSReleaseTag():
             allow_http_fallback=False,
         ) as response:
             url = response.geturl()
-    except Exception as e:
+    except Exception as e:  # pylint: disable=broad-except
         general.info("Could not determine the newest release: %s" % e)
         return None
 
@@ -132,7 +130,7 @@ def getAvailablePythonVersions(release_tag):
             ) as response:
                 if response.getcode() not in (200, 206):
                     continue
-        except Exception:
+        except Exception:  # pylint: disable=broad-except
             continue
 
         versions.append(version)
@@ -337,7 +335,12 @@ def _extractInstallOnly(archive, target_directory):
     # Remove a previous installation, so that only the newest version
     # is kept.
     if os.path.isdir(target_directory):
-        removeDirectory(target_directory, ignore_errors=True)
+        removeDirectory(
+            target_directory,
+            logger=None,
+            ignore_errors=True,
+            extra_recommendation=None,
+        )
 
     makePath(target_directory)
 
@@ -365,7 +368,12 @@ def _extractInstallOnly(archive, target_directory):
 
         shutil.move(extracted_prefix, temporary)
 
-        removeDirectory(target_directory, ignore_errors=True)
+        removeDirectory(
+            target_directory,
+            logger=None,
+            ignore_errors=True,
+            extra_recommendation=None,
+        )
 
         makePath(target_directory)
 

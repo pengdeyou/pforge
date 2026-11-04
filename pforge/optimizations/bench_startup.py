@@ -40,6 +40,7 @@ def measureOne(python_path, package_name):
             [sys.executable, "-c", code],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
+            check=False,
         )
         times.append(time.perf_counter() - start)
 

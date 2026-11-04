@@ -32,7 +32,6 @@ import os
 import re
 
 from pforge.PythonVersions import python_version_full_str
-from pforge.utils.Execution import getExecutablePath
 from pforge.utils.FileOperations import getNormalizedPath, getNormalizedPathJoin
 
 
@@ -247,7 +246,7 @@ def getLinuxPythonSysConfig(python_prefix):
 
     try:
         return eval(match.group(1), {"__builtins__": {}}, {})  # pylint: disable=eval-used
-    except Exception:
+    except Exception:  # pylint: disable=broad-except
         return None
 
 
@@ -266,77 +265,6 @@ def getLinuxPythonVersionInfo(python_prefix):
         return None
 
     return sys_config.get("VERSION")
-
-
-def getContainerCommand():
-    """Get the container runtime command to use, or None if there is none.
-
-    Returns:
-        list of str or None
-    """
-    for candidate in ("docker", "podman"):
-        path = getExecutablePath(candidate)
-
-        if path is not None:
-            return [path]
-
-    return None
-
-
-def checkContainerRuntime():
-    """Check that a container runtime is available and working.
-
-    Returns:
-        tuple(list of str, str) or (None, str) - the command and the error
-    """
-    command = getContainerCommand()
-
-    if command is None:
-        return None, """\
-No container runtime found. Install Docker or Podman, or provide a Linux \
-Python installation with '--linux-python-prefix=DIRECTORY'."""
-
-    return command, None
-
-
-def getLinuxPythonImageName():
-    """Get the container image name to use for the target Python."""
-    return "python:%s-slim" % python_version_full_str
-
-
-def getLinuxPythonContainerCommand(
-    python_prefix,
-    container_command=None,
-    image_name=None,
-):
-    """Get the command to run a Python of the target platform.
-
-    Args:
-        python_prefix: str, host directory that holds the Linux Python
-        container_command: list of str or None, container runtime command
-        image_name: str or None, container image to use
-
-    Returns:
-        list of str
-    """
-    if container_command is None:
-        container_command = getContainerCommand()
-
-    if image_name is None:
-        image_name = getLinuxPythonImageName()
-
-    command = list(container_command)
-
-    command += ["run", "--rm"]
-
-    # The prefix has to be visible inside the container, and the paths
-    # have to match, so that the target Python reports paths that the
-    # compiler can use as well.
-    command += ["-v", "%s:%s" % (getNormalizedPath(python_prefix), python_prefix)]
-
-    command += [image_name, "python3"]
-
-    return command
 
 
 def getLinuxPythonCacheDirectory():

@@ -453,6 +453,7 @@ class _PurePythonBdistWheel(_bdist_wheel):
     def finalize_options(self):
         _bdist_wheel.finalize_options(self)
 
+        # pylint: disable=attribute-defined-outside-init
         self.root_is_purelib = True
 
     def get_tag(self):

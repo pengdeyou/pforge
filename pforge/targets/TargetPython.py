@@ -334,48 +334,6 @@ def _getWasiCommand(python_prefix, assume_yes_for_downloads):
     ]
 
 
-def _getLinuxCommand(python_prefix, assume_yes_for_downloads):
-    """Get the command to run a Linux Python for ABI queries.
-
-    A Linux Python is needed to build a Linux target from a macOS or
-    Windows host. When the user provided one, it is used directly, and
-    otherwise a container runtime provides one that matches the host
-    Python version.
-    """
-    from pforge.utils.LinuxPython import (
-        checkContainerRuntime,
-        getLinuxPythonContainerCommand,
-    )
-
-    if python_prefix is not None:
-        python_executable = getNormalizedPathJoin(
-            python_prefix, "bin", "python3"
-        )
-
-        if not os.path.isfile(python_executable):
-            raise TargetPythonError(
-                "Linux Python executable '%s' does not exist."
-                % python_executable
-            )
-
-        return [python_executable]
-
-    container_command, error = checkContainerRuntime()
-
-    if container_command is None:
-        raise TargetPythonError(error)
-
-    # The container provides the Linux Python, the prefix is only used
-    # to keep the paths of the two in sync, so that the ABI values
-    # reported are usable by the compiler as well.
-    python_prefix = getLinuxPythonPrefix()
-
-    return getLinuxPythonContainerCommand(
-        python_prefix=python_prefix,
-        container_command=container_command,
-    )
-
-
 def _getBrokerCommand(python_command):
     return list(python_command) + [
         "-u",
@@ -411,11 +369,6 @@ def getTargetPythonCommand(
         )
     elif target_spec.isWin32Target():
         python_command = target_spec.getTargetRunCommand(python_executable)
-    elif target_spec.isElfTarget():
-        python_command = _getLinuxCommand(
-            python_prefix=python_prefix,
-            assume_yes_for_downloads=assume_yes_for_downloads,
-        )
     else:
         python_command = [sys.executable]
 

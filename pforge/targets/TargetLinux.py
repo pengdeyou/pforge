@@ -18,24 +18,14 @@ and no emulation is needed for the ABI queries.
 
 import os
 
-from pforge.options.Options import (
-    getLinuxPythonPrefixPath,
-    shallDisableCacheUsage,
-)
+from pforge.options.Options import getLinuxPythonPrefixPath
 from pforge.PythonVersions import getImportlibSubPackages
 from pforge.Tracing import general
 from pforge.utils.LinuxPython import (
     getLinuxPythonIncludePath,
     getLinuxPythonLibraryPath,
-    getLinuxPythonSysConfig,
     getLinuxPythonVersionInfo,
     getLocalLinuxPythonPrefix,
-)
-from pforge.utils.StaticLibraries import (
-    couldUseStaticLibPython as couldUseNativeStaticLibPython,
-)
-from pforge.utils.StaticLibraries import (
-    getSystemStaticLibPythonPath as getNativeSystemStaticLibPythonPath,
 )
 from pforge.utils.Utils import isWin32Windows
 
@@ -165,8 +155,6 @@ class TargetLinux(TargetBase):
 
     def checkPreconditions(self):
         """Check that the Linux target can be built on this host."""
-
-        # Many error exits, pylint: disable=too-many-return-statements
 
         python_prefix = self._getPythonPrefix()
 

@@ -22,7 +22,6 @@ def makeSignal():
 
 def runCheckOnly(count):
     """Membership check only, without the set update."""
-    allowed = allowed_tags
     tag_set = TagSet()
 
     for _ in range(count):
@@ -43,7 +42,7 @@ def main():
     count = 200000
 
     for name, func in (("add (per tag)", runCheckOnly), ("onSignal", runSignal)):
-        seconds = timeit.timeit(lambda: func(count), number=1)
+        seconds = timeit.timeit(lambda func=func: func(count), number=1)
 
         print(
             "  %-16s %8.1f ms for %d rounds (%.3f us per round)"
