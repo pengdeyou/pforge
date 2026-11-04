@@ -3000,6 +3000,9 @@ def getMacOSTargetArch():
 
 def getTargetArch():
     """:returns: str or None, value of ``--target-arch`` option"""
+    if options is None:
+        return None
+
     return options.c_target_arch
 
 
@@ -3602,6 +3605,9 @@ def getTargetPythonDescription():
 
 def getWasiPythonPrefixPath():
     """*str* or *None*, value of ``--wasi-python-prefix``"""
+    if options is None:
+        return None
+
     if options.wasi_python_prefix is None:
         return None
 
@@ -3610,6 +3616,9 @@ def getWasiPythonPrefixPath():
 
 def getWin32PythonExePath():
     """*str* or *None*, value of ``--win32-python-exe``"""
+    if options is None:
+        return None
+
     if options.win32_python_exe is None:
         return None
 
