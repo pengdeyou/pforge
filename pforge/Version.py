@@ -4,7 +4,7 @@
 """Pforge version related stuff."""
 
 version_string = """\
-Pforge V1.0.1
+Pforge V1.0.2
 Copyright (C) 2026 Kay Hayen."""
 
 
