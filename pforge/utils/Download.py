@@ -1,0 +1,466 @@
+#     Copyright 2026, Kay Hayen, mailto:kay.hayen@gmail.com find license text at end of file
+
+
+"""Download utilities and extract locally when allowed.
+
+Mostly used on Windows, for dependency walker and ccache binaries.
+"""
+
+import contextlib
+import os
+
+from pforge.Progress import withPforgeDownloadProgressBar
+from pforge.PythonFlavors import isPythonBuildStandalonePython
+from pforge.PythonPrefixes import getSystemPrefixPath
+from pforge.PythonVersions import python_version, python_version_full_str
+from pforge.Tracing import general
+from pforge.Version import getPforgeVersion
+
+from .AppDirs import getCacheDir
+from .FileOperations import (
+    addFileExecutablePermission,
+    deleteFile,
+    getNormalizedPath,
+    getNormalizedPathJoin,
+    makePath,
+    openTextFile,
+    queryUser,
+)
+from .Zipfiles import extractZipFile
+
+# Download modes for tools that Pforge may download on demand.
+DOWNLOAD_MODE_NO = "no"
+DOWNLOAD_MODE_ASK = "ask"
+DOWNLOAD_MODE_YES = "yes"
+
+
+def getDownloadMode(assume_yes_for_downloads):
+    """Convert the assume yes option to a download mode.
+
+    Args:
+        assume_yes_for_downloads: bool, whether downloads may happen without asking.
+
+    Returns:
+        One of DOWNLOAD_MODE_ASK, DOWNLOAD_MODE_YES.
+    """
+    return DOWNLOAD_MODE_YES if assume_yes_for_downloads else DOWNLOAD_MODE_ASK
+
+
+def getCertifiModule():
+    try:
+        # Try to import vendored certifi first
+        from pip._vendor import certifi
+    except ImportError:
+        try:
+            # Fallback to system-installed certifi
+            import certifi  # type: ignore
+        except ImportError:
+            certifi = None  # type: ignore
+
+    return certifi
+
+
+def shouldDownload(message, reject_message, download_mode):
+    """Check if we should download.
+
+    Args:
+        message: Text explaining what would be downloaded.
+        reject_message: Error message to use if downloads are not allowed.
+        download_mode: One of DOWNLOAD_MODE_NO, DOWNLOAD_MODE_ASK, DOWNLOAD_MODE_YES.
+
+    Returns:
+        bool, whether a download should be made.
+    """
+
+    if download_mode == DOWNLOAD_MODE_NO:
+        reply = "no"
+    elif download_mode == DOWNLOAD_MODE_YES:
+        reply = "yes"
+    else:
+        assert download_mode == DOWNLOAD_MODE_ASK, download_mode
+
+        reply = queryUser(
+            question="""\
+%s
+
+Is it OK to download and put it in local user cache.
+
+Fully automatic, cached. Proceed and download""" % (message,),
+            choices=("yes", "no"),
+            default="yes",
+            default_non_interactive="no",
+        )
+
+    if reply != "yes":
+        if reject_message is not None:
+            if download_mode == DOWNLOAD_MODE_NO:
+                reject_message += " Make sure to allow downloading it when prompted."
+
+            return general.sysexit(reject_message)
+
+        return False
+
+    return True
+
+
+@contextlib.contextmanager
+def withUrlOpen(url, request_headers, timeout, allow_http_fallback):
+    if python_version < 0x300:
+        from urllib2 import (  # pylint: disable=I0021,import-error
+            Request,
+            urlopen,
+        )
+    else:
+        from urllib.request import Request, urlopen
+
+    ssl_context = None
+
+    certifi = getCertifiModule()
+
+    if certifi is not None:
+        certifi_path = certifi.where()
+
+        if certifi_path and os.path.exists(certifi_path):
+            import ssl
+
+            # spell-checker: ignore cafile
+            ssl_context = ssl.create_default_context(cafile=certifi_path)
+
+    if request_headers is None:
+        request_headers = {}
+    else:
+        request_headers = dict(request_headers)
+
+    # Be fair and provide a user agent
+    request_headers.setdefault(
+        "User-Agent", "Pforge Downloader/%s" % getPforgeVersion()
+    )
+
+    def openResponse(request, ssl_context):
+        if python_version < 0x300:
+            return urlopen(request, timeout=timeout)
+        else:
+            return urlopen(request, context=ssl_context, timeout=timeout)
+
+    req = Request(url, headers=request_headers)
+
+    try:
+        response = openResponse(req, ssl_context)
+        yield response
+        response.close()
+    except Exception:  # pylint: disable=broad-except
+        if not allow_http_fallback or not url.startswith("https://"):
+            raise
+
+        http_url = "http://" + url[len("https://") :]
+        req_fallback = Request(http_url, headers=request_headers)
+
+        response = openResponse(req_fallback, None)
+        yield response
+        response.close()
+
+
+def getDownload(name, url, download_path):
+    with withPforgeDownloadProgressBar(desc="Download %s" % name) as report_hook:
+        try:
+            with withUrlOpen(
+                url=url,
+                request_headers=None,
+                timeout=30.0,
+                allow_http_fallback=True,
+            ) as response:
+                # Try to get the total size from headers
+                if python_version < 0x300:
+                    total_size_header = response.info().getheader("Content-Length")
+                else:
+                    total_size_header = response.getheader("Content-Length")
+
+                total_size = (
+                    int(total_size_header)
+                    if total_size_header and total_size_header.isdigit()
+                    else -1
+                )
+                block_size_for_reading = 8192
+
+                # Initial call for progress bar to set total size.
+                if report_hook is not None:
+                    report_hook(0, 1, total_size)
+
+                copied_size = 0
+
+                # Actual file writing
+                with open(download_path, "wb") as out_file:
+                    while True:
+                        chunk = response.read(block_size_for_reading)
+                        if not chunk:
+                            break
+                        out_file.write(chunk)
+                        copied_size += len(chunk)
+
+                        if report_hook is not None:
+                            report_hook(copied_size, 1, total_size)
+        except BaseException:
+            deleteFile(download_path, must_exist=False)
+            raise
+
+
+def getDownloadCacheName():
+    return "downloads"
+
+
+def getDownloadCacheDir():
+    return getCacheDir(getDownloadCacheName())
+
+
+def getCachedDownload(
+    name,
+    url,
+    binary,
+    unzip,
+    flatten,
+    is_arch_specific,
+    specificity,
+    message,
+    reject,
+    download_mode,
+):
+    # Many branches to deal with.
+    # pylint: disable=too-many-return-statements
+
+    pforge_download_dir = getDownloadCacheDir()
+
+    pforge_download_dir = getNormalizedPathJoin(
+        pforge_download_dir, os.path.basename(binary).replace(".exe", "")
+    )
+
+    if is_arch_specific:
+        pforge_download_dir = getNormalizedPathJoin(
+            pforge_download_dir, is_arch_specific
+        )
+
+    if specificity:
+        pforge_download_dir = getNormalizedPathJoin(pforge_download_dir, specificity)
+
+    download_path = getNormalizedPathJoin(pforge_download_dir, os.path.basename(url))
+    exe_path = getNormalizedPathJoin(pforge_download_dir, binary)
+
+    makePath(pforge_download_dir)
+
+    if not os.path.isfile(download_path) and not os.path.isfile(exe_path):
+        if not shouldDownload(
+            message=message,
+            reject_message=reject,
+            download_mode=download_mode,
+        ):
+            return None
+
+        general.info("Downloading '%s'." % url)
+
+        try:
+            getDownload(
+                name=name,
+                url=url,
+                download_path=download_path,
+            )
+        except Exception as e:  # Any kind of error, pylint: disable=broad-except
+            return general.sysexit(
+                "Failed to download '%s' due to '%s'. Contents should manually be copied to '%s'."
+                % (url, e, download_path)
+            )
+
+    if unzip:
+        if not os.path.isfile(exe_path) and os.path.isfile(download_path):
+            general.info("Extracting to '%s'" % exe_path)
+
+            def get_target_filename(member_name):
+                if not member_name or member_name.endswith("/"):
+                    return None
+
+                if flatten:
+                    return os.path.basename(member_name)
+
+                return member_name
+
+            try:
+                extractZipFile(
+                    zip_path=download_path,
+                    target_dir=pforge_download_dir,
+                    get_target_filename=get_target_filename,
+                    error_exit=False,
+                    logger=general,
+                )
+
+            except (
+                # Catching anything zip throws, pylint: disable=broad-except
+                Exception
+            ):
+                general.info("Problem with the downloaded zip file, deleting it.")
+
+                deleteFile(binary, must_exist=False)
+                deleteFile(download_path, must_exist=True)
+
+                return general.sysexit(
+                    "Error, need '%s' as extracted from '%s'." % (binary, url)
+                )
+
+        # Check success here, and make sure it's executable.
+        if os.path.isfile(exe_path):
+            addFileExecutablePermission(exe_path)
+        else:
+            if reject:
+                return general.sysexit(reject)
+
+            return None
+
+        return getNormalizedPath(exe_path)
+    else:
+        return getNormalizedPath(download_path)
+
+
+def getCachedDownloadedMinGW64(target_arch, download_mode, experimental=False):
+    # Large URLs, pylint: disable=line-too-long
+    if target_arch == "x86_64":
+        if experimental:
+            url = "https://github.com/brechtsanders/winlibs_mingw/releases/download/15.2.0posix-13.0.0-msvcrt-r6/winlibs-x86_64-posix-seh-gcc-15.2.0-mingw-w64msvcrt-13.0.0-r6.zip"
+        else:
+            url = "https://github.com/brechtsanders/winlibs_mingw/releases/download/15.2.0posix-13.0.0-msvcrt-r6/winlibs-x86_64-posix-seh-gcc-15.2.0-mingw-w64msvcrt-13.0.0-r6.zip"
+
+        binary = r"mingw64\bin\gcc.exe"
+    elif target_arch == "x86":
+        if experimental:
+            url = "https://github.com/brechtsanders/winlibs_mingw/releases/download/15.2.0posix-13.0.0-msvcrt-r6/winlibs-i686-posix-dwarf-gcc-15.2.0-mingw-w64msvcrt-13.0.0-r6.zip"
+        else:
+            url = "https://github.com/brechtsanders/winlibs_mingw/releases/download/15.2.0posix-13.0.0-msvcrt-r6/winlibs-i686-posix-dwarf-gcc-15.2.0-mingw-w64msvcrt-13.0.0-r6.zip"
+
+        binary = r"mingw32\bin\gcc.exe"
+    elif target_arch == "arm64":
+        return None
+    else:
+        assert False, target_arch
+
+    gcc_binary = getCachedDownload(
+        name="mingw64",
+        url=url,
+        is_arch_specific=target_arch,
+        specificity=url.rsplit("/", 2)[1],
+        binary=binary,
+        unzip=True,
+        flatten=False,
+        message="Pforge will use gcc from MinGW64 of winlibs to compile on Windows.",
+        # When downloads are not allowed, e.g. for the version output, only
+        # a cached compiler is used, and its absence is not a fatal error.
+        reject=(
+            "Only this specific gcc is supported with Pforge."
+            if download_mode != DOWNLOAD_MODE_NO
+            else None
+        ),
+        download_mode=download_mode,
+    )
+
+    return gcc_binary
+
+
+def _getPythonBuildStandaloneTargetTriple():
+    import sysconfig
+
+    target_triple = sysconfig.get_config_var("HOST_GNU_TYPE")
+
+    if target_triple and "linux" in target_triple:
+        return target_triple
+
+    platform_tag = sysconfig.get_platform()
+
+    if platform_tag.startswith("macosx-"):
+        machine = platform_tag.rsplit("-", 1)[-1]
+
+        if machine == "arm64":
+            machine = "aarch64"
+
+        return "%s-apple-darwin" % machine
+
+    if platform_tag.startswith("win-"):
+        machine = platform_tag.rsplit("-", 1)[-1]
+
+        if machine in ("amd64", "x86_64"):
+            return "x86_64-pc-windows-msvc"
+        elif machine == "arm64":
+            return "aarch64-pc-windows-msvc"
+
+    return None
+
+
+def _getPythonBuildStandaloneFullBuildURL():
+    """Get the URL of the full build of this Python Build Standalone Python.
+
+    TODO: Use this for automatic download of the full build in the future.
+
+    Returns:
+        str or None: URL of the matching full build.
+    """
+
+    if not isPythonBuildStandalonePython():
+        return None
+
+    build_tag_filename = os.path.join(getSystemPrefixPath(), "BUILD")
+
+    if not os.path.isfile(build_tag_filename):
+        return None
+
+    with openTextFile(build_tag_filename, "r") as build_tag_file:
+        build_tag = build_tag_file.read().strip()
+
+    target_triple = _getPythonBuildStandaloneTargetTriple()
+
+    if target_triple is None:
+        return None
+
+    return """\
+https://github.com/astral-sh/python-build-standalone/releases/download/%s/\
+cpython-%s+%s-%s-pgo+lto-full.tar.zst""" % (
+        build_tag,
+        python_version_full_str,
+        build_tag,
+        target_triple,
+    )
+
+
+def getPythonBuildStandaloneFullBuildHint():
+    """Get hint for installing the full build of this Python Build Standalone.
+
+    Returns:
+        str or None: Command to download and extract a matching full build.
+    """
+
+    full_build_url = _getPythonBuildStandaloneFullBuildURL()
+
+    if full_build_url is None:
+        return None
+
+    return (
+        """\
+To install the full build matching this Python, use:
+
+  mkdir -p ~/.local/share/python-build-standalone && curl -L '%s' | tar -x --zstd -C ~/.local/share/python-build-standalone
+
+Then use '~/.local/share/python-build-standalone/python/install/bin/python3' to run Pforge."""
+        % full_build_url
+    )
+
+
+#     Part of "Pforge", an optimizing Python compiler that is compatible and
+#     integrates with CPython, but also works on its own.
+#
+#     Licensed under the GNU Affero General Public License, Version 3 (the "License");
+#     you may not use this file except in compliance with the License.
+#     You may obtain a copy of the License at
+#
+#        https://www.gnu.org/licenses/agpl-3.0.txt
+#
+#     See also: "Pforge Runtime Library Exception, Version 1.0" in file
+#     "LICENSE-RUNTIME.txt" for additional permissions granted under Section 7.
+#
+#     Unless required by applicable law or agreed to in writing, software
+#     distributed under the License is distributed on an "AS IS" BASIS,
+#     WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+#     See the License for the specific language governing permissions and
+#     limitations under the License.

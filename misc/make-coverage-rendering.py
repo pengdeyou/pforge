@@ -1,0 +1,104 @@
+#!/usr/bin/python
+#     Copyright 2026, Kay Hayen, mailto:kay.hayen@gmail.com find license text at end of file
+
+
+"""Coverage rendering tool."""
+
+import os
+import shutil
+import subprocess
+import sys
+
+
+def main():
+    # Set the stage.
+    os.chdir(os.path.dirname(__file__))
+    shutil.rmtree("coverage", ignore_errors=True)
+
+    print("Fetching coverage files:")
+
+    subprocess.call(
+        ["rsync", "-az", "--delete", "%s/" % os.environ["COVERAGE_DIR"], "coverage/"]
+    )
+
+    print("Combining coverage files:")
+    os.chdir("coverage")
+
+    print("Detect coverage file roots:")
+    # Now detect where the files were collected from:
+
+    paths = [os.path.abspath(os.path.join(os.curdir, "..", ".."))]
+
+    for filename in os.listdir("."):
+        if not filename.startswith("meta.coverage"):
+            continue
+
+        values = {}
+        with open(filename, encoding="utf-8") as f:
+            # pylint: disable=exec-used
+            exec(f.read(), values)
+
+        if "__builtins__" in values:
+            del values["__builtins__"]
+
+        paths.append(values["PFORGE_SOURCE_DIR"])
+
+    # spell-checker: ignore coveragerc
+    coverage_path = os.path.abspath(".coveragerc")
+
+    with open(coverage_path, "w", encoding="utf-8") as coverage_rc_file:
+        coverage_rc_file.write("[paths]\n")
+        coverage_rc_file.write("source = \n")
+
+        for path in paths:
+            coverage_rc_file.write("   " + path + "\n")
+
+    subprocess.call(
+        # spell-checker: ignore rcfile
+        [
+            sys.executable,
+            "-m",
+            "coverage",
+            "combine",
+            "--rcfile",
+            coverage_path,
+        ]
+    )
+
+    assert os.path.exists(coverage_path)
+
+    subprocess.call(
+        [
+            sys.executable,
+            "-m",
+            "coverage",
+            "html",
+            "--rcfile",
+            coverage_path,
+        ]
+    )
+
+    # Clean up after ourselves again.
+    # shutil.rmtree("coverage", ignore_errors = True)
+
+
+if __name__ == "__main__":
+    main()
+
+#     Part of "Pforge", an optimizing Python compiler that is compatible and
+#     integrates with CPython, but also works on its own.
+#
+#     Licensed under the GNU Affero General Public License, Version 3 (the "License");
+#     you may not use this file except in compliance with the License.
+#     You may obtain a copy of the License at
+#
+#        https://www.gnu.org/licenses/agpl-3.0.txt
+#
+#     See also: "Pforge Runtime Library Exception, Version 1.0" in file
+#     "LICENSE-RUNTIME.txt" for additional permissions granted under Section 7.
+#
+#     Unless required by applicable law or agreed to in writing, software
+#     distributed under the License is distributed on an "AS IS" BASIS,
+#     WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+#     See the License for the specific language governing permissions and
+#     limitations under the License.

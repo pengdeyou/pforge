@@ -1,0 +1,593 @@
+name: Pforge tests
+# makes little sense, spell-checker: disable
+on:
+  pull_request:
+    branches:
+      - develop
+      - integration
+  push:
+    branches:
+      - main
+      - develop
+      - integration
+      - factory
+      - release/**
+      - hotfix/**
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  PFORGE_UPDATE_CHECK: "never"
+
+jobs:
+  checks:
+    runs-on: ubuntu-24.04
+    name: Checks
+    steps:
+      - name: 🛎️ Checkout (Attempt 1)
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          fetch-tags: false
+          filter: blob:none
+        continue-on-error: true
+        id: checkout
+
+      - name: ⏳ Wait for checkout retry 1
+        if: steps.checkout.outcome == 'failure'
+        run: sleep 120s
+        shell: bash
+
+      - name: 🛎️ Checkout (Attempt 2)
+        if: steps.checkout.outcome == 'failure'
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          fetch-tags: false
+          filter: blob:none
+        continue-on-error: true
+        id: checkout_retry_1
+
+      - name: ⏳ Wait for checkout retry 2
+        if: steps.checkout_retry_1.outcome == 'failure'
+        run: sleep 300s
+        shell: bash
+
+      - name: 🛎️ Checkout (Attempt 3)
+        if: steps.checkout_retry_1.outcome == 'failure'
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          fetch-tags: false
+          filter: blob:none
+        id: checkout_retry_2
+
+      - name: 🐍 Use Python 3.11
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+
+      - name: 🧳 Install Pforge and dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install patchelf gdb ccache libfuse2
+          python -m pip install --no-python-version-warning --disable-pip-version-check .
+
+      - name: 🔎 PyLint on Pforge source code
+        run: |
+          python ./bin/check-pforge-with-pylint --assume-yes-for-downloads
+
+      - name: 🔎 RestLint on Pforge source code
+        run: |
+          python ./bin/check-pforge-with-restlint --assume-yes-for-downloads
+
+      - name: 🔎 YamlLint on Pforge source code
+        run: |
+          python ./bin/check-pforge-with-yamllint --assume-yes-for-downloads
+
+      - name: 🔎 Codespell on Pforge source code
+        run: |
+          python ./bin/check-pforge-with-codespell --assume-yes-for-downloads
+
+      - name: 🔎 Auto-format check on Pforge source code
+        run: |
+          python ./bin/autoformat-pforge-source --check-only --assume-yes-for-downloads
+
+      - name: 🔎 Specialized C code check
+        run: |
+          python ./bin/generate-specialized-c-code --check
+
+      - name: 🔎 Specialized Python code check
+        run: |
+          python ./bin/generate-specialized-python-code --check
+
+  linux:
+    needs: checks
+    runs-on: ubuntu-24.04
+    strategy:
+      matrix:
+        python_version:
+          - "3.8"
+          - "3.9"
+          - "3.10"
+          - "3.11"
+          - "3.12"
+          - "3.13"
+          - "3.14"
+          - "3.15"
+    name: Ubuntu Python ${{ matrix.python_version }}
+    steps:
+      - name: 🛎️ Checkout (Attempt 1)
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          fetch-tags: false
+          filter: blob:none
+        continue-on-error: true
+        id: checkout
+
+      - name: ⏳ Wait for checkout retry 1
+        if: steps.checkout.outcome == 'failure'
+        run: sleep 120s
+        shell: bash
+
+      - name: 🛎️ Checkout (Attempt 2)
+        if: steps.checkout.outcome == 'failure'
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          fetch-tags: false
+          filter: blob:none
+        continue-on-error: true
+        id: checkout_retry_1
+
+      - name: ⏳ Wait for checkout retry 2
+        if: steps.checkout_retry_1.outcome == 'failure'
+        run: sleep 300s
+        shell: bash
+
+      - name: 🛎️ Checkout (Attempt 3)
+        if: steps.checkout_retry_1.outcome == 'failure'
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          fetch-tags: false
+          filter: blob:none
+        id: checkout_retry_2
+
+      - name: 🐍 Use Python ${{ matrix.python_version }}
+        if: matrix.python_version != '3.15'
+        uses: actions/setup-python@v7
+        with:
+          python-version: ${{ matrix.python_version }}
+
+      - name: 🎒 Install system packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y patchelf gdb ccache libfuse2
+
+      - name: 🐍 Install Python 3.15 (deadsnakes)
+        if: matrix.python_version == '3.15'
+        run: |
+          sudo add-apt-repository -y ppa:deadsnakes/ppa
+          sudo apt-get update
+          sudo apt-get install -y python3.15 python3.15-dev python3.15-venv
+          python3.15 -m venv .venv-3.15
+          echo "VIRTUAL_ENV=$PWD/.venv-3.15" >> $GITHUB_ENV
+          echo "$PWD/.venv-3.15/bin" >> $GITHUB_PATH
+
+      - name: 🧳 Install Pforge
+        run: |
+          python -m pip install --upgrade --no-python-version-warning --disable-pip-version-check pip setuptools wheel
+          python -m pip install --no-python-version-warning --disable-pip-version-check .
+
+      - name: ⚙️ Verbose scons output in compilation
+        run: |
+          set -x
+
+          cleanupEmptyModuleOutputs() {
+            rm -rf EmptyModuleTest EmptyModuleTest.*
+            rm -f EmptyModuleTest.bin EmptyModuleTest.exe
+          }
+
+          retryCompileCommand() {
+            cleanupEmptyModuleOutputs
+
+            if "$@"; then
+              return 0
+            fi
+
+            echo "Retrying once after 30 seconds to tolerate a transient runner failure."
+            sleep 30
+
+            cleanupEmptyModuleOutputs
+
+            "$@"
+            return $?
+          }
+
+          retryCompileCommand ${PYTHON:-python} -m pforge --mode=module --show-scons --run --report=compilation-report-module.xml --assume-yes-for-downloads --experimental=debug-report-traceback tests/basics/EmptyModuleTest.py
+          retryCompileCommand ${PYTHON:-python} -m pforge --mode=accelerated --show-scons --run --report=compilation-report-accelerated.xml --assume-yes-for-downloads --experimental=debug-report-traceback tests/basics/EmptyModuleTest.py
+          retryCompileCommand ${PYTHON:-python} -m pforge --mode=standalone --show-scons --run --report=compilation-report-standalone.xml --assume-yes-for-downloads --experimental=debug-report-traceback tests/basics/EmptyModuleTest.py
+          readelf -d EmptyModuleTest.dist/EmptyModuleTest.bin | tee standalone-binary-readelf.txt
+          ldd EmptyModuleTest.dist/EmptyModuleTest.bin | tee standalone-binary-ldd.txt
+          retryCompileCommand ${PYTHON:-python} -m pforge --mode=onefile --show-scons --run --report=compilation-report-onefile.xml --assume-yes-for-downloads --experimental=debug-report-traceback tests/basics/EmptyModuleTest.py
+        shell: bash
+
+      - name: 📤 Archive compilation reports for empty modules
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: compilation-reports-${{ runner.os }}-${{ matrix.python_version }}
+          path: |
+            *.xml
+            standalone-binary-readelf.txt
+            standalone-binary-ldd.txt
+
+      # This can be used to ssh into GitHub actions if debugging is needed.
+      # - uses: actions/checkout@v7
+      # - name: Setup upterm session
+      #   uses: lhotari/action-upterm@v1
+      #   with:
+      #     ## limits ssh access and adds the ssh public keys of the listed GitHub users
+      #     limit-access-to-users: kayhayen
+
+      - name: 🧪 Run Pforge test suite
+        run: |
+          ${PYTHON:-python} -m pforge --version
+          env | sort
+          ${PYTHON:-python} ./tests/run-tests --no-other-python --skip-reflection-test --skip-all-cpython-tests --assume-yes-for-downloads
+
+  mac-python3:
+    needs: linux
+    runs-on: macos-latest
+    strategy:
+      matrix:
+        python_version:
+          - "3.9"
+          - "3.10"
+          - "3.11"
+          - "3.12"
+          - "3.13"
+          - "3.14"
+    name: macOS Python ${{ matrix.python_version }}
+    steps:
+      - name: 🛎️ Checkout (Attempt 1)
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          fetch-tags: false
+          filter: blob:none
+        continue-on-error: true
+        id: checkout
+
+      - name: ⏳ Wait for checkout retry 1
+        if: steps.checkout.outcome == 'failure'
+        run: sleep 120s
+        shell: bash
+
+      - name: 🛎️ Checkout (Attempt 2)
+        if: steps.checkout.outcome == 'failure'
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          fetch-tags: false
+          filter: blob:none
+        continue-on-error: true
+        id: checkout_retry_1
+
+      - name: ⏳ Wait for checkout retry 2
+        if: steps.checkout_retry_1.outcome == 'failure'
+        run: sleep 300s
+        shell: bash
+
+      - name: 🛎️ Checkout (Attempt 3)
+        if: steps.checkout_retry_1.outcome == 'failure'
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          fetch-tags: false
+          filter: blob:none
+        id: checkout_retry_2
+
+      - name: 🐍 Use Python ${{ matrix.python_version }}
+        uses: actions/setup-python@v7
+        with:
+          python-version: ${{ matrix.python_version }}
+
+      - name: ⚙️ Verbose installation output for Python
+        run: |
+          set -x
+          which python
+          otool -L $(which python)
+          otool -l $(which python)
+          ls -lR $(dirname $(dirname $(which python)))
+
+      - name: 🧳 Install Pforge and dependencies
+        run: |
+          pip install --no-python-version-warning --disable-pip-version-check .
+
+      - name: Verbose scons output in compilation
+        run: |
+          set -x
+
+          cleanupEmptyModuleOutputs() {
+            rm -rf EmptyModuleTest EmptyModuleTest.*
+            rm -f EmptyModuleTest.bin EmptyModuleTest.exe
+          }
+
+          retryCompileCommand() {
+            cleanupEmptyModuleOutputs
+
+            if "$@"; then
+              return 0
+            fi
+
+            echo "Retrying once after 30 seconds to tolerate a transient runner failure."
+            sleep 30
+
+            cleanupEmptyModuleOutputs
+
+            "$@"
+            return $?
+          }
+
+          retryCompileCommand python -m pforge --mode=module --show-scons --run --report=compilation-report-module.xml --assume-yes-for-downloads tests/basics/EmptyModuleTest.py
+          retryCompileCommand python -m pforge --mode=accelerated --show-scons --run --report=compilation-report-accelerated.xml --assume-yes-for-downloads --experimental=debug-report-traceback tests/basics/EmptyModuleTest.py
+          retryCompileCommand python -m pforge --mode=standalone --show-scons --run --report=compilation-report-standalone.xml --assume-yes-for-downloads --experimental=debug-report-traceback tests/basics/EmptyModuleTest.py
+          retryCompileCommand python -m pforge --mode=onefile --show-scons --run --report=compilation-report-onefile.xml --assume-yes-for-downloads --experimental=debug-report-traceback tests/basics/EmptyModuleTest.py
+
+          # DLL mode has no run ability at this time.
+          retryCompileCommand python -m pforge --mode=dll --show-scons --report=compilation-report-dll.xml --assume-yes-for-downloads --experimental=debug-report-traceback tests/basics/EmptyModuleTest.py
+        shell: bash
+
+      - name: Archive compilation reports for empty modules
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: compilation-reports-${{ runner.os }}-${{ matrix.python_version }}
+          path: |
+            *.xml
+
+      - name: 🐞 Check all modes for debug output
+        run: |
+          set -x
+          python -m pforge --mode=module --run --report=compilation-report-module.xml --debug --assume-yes-for-downloads tests/basics/EmptyModuleTest.py
+          python -m pforge --mode=accelerated --run --report=compilation-report-accelerated.xml --debug --assume-yes-for-downloads --experimental=debug-report-traceback tests/basics/EmptyModuleTest.py
+          python -m pforge --mode=standalone --run --report=compilation-report-standalone.xml --debug --assume-yes-for-downloads --experimental=debug-report-traceback tests/basics/EmptyModuleTest.py
+          python -m pforge --mode=onefile --run --report=compilation-report-onefile.xml --debug --assume-yes-for-downloads --experimental=debug-report-traceback tests/basics/EmptyModuleTest.py
+
+          # DLL mode has no run ability at this time.
+          python -m pforge --mode=dll --report=compilation-report-onefile.xml --debug --assume-yes-for-downloads --experimental=debug-report-traceback tests/basics/EmptyModuleTest.py
+        shell: bash
+
+      - name: Run Pforge test suite
+        run: |
+          python -m pforge --version
+          env | sort
+          python ./tests/run-tests --no-other-python --skip-reflection-test --skip-all-cpython-tests --assume-yes-for-downloads
+
+  windows:
+    needs: linux
+    runs-on: windows-latest
+    strategy:
+      matrix:
+        python_version:
+          - "3.7"
+          - "3.8"
+          - "3.9"
+          - "3.10"
+          - "3.11"
+          - "3.12"
+          - "3.13"
+          - "3.14"
+    name: Windows Python ${{ matrix.python_version }}
+    steps:
+      - name: 🛎️ Checkout (Attempt 1)
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          fetch-tags: false
+          filter: blob:none
+        continue-on-error: true
+        id: checkout
+
+      - name: ⏳ Wait for checkout retry 1
+        if: steps.checkout.outcome == 'failure'
+        run: sleep 120s
+        shell: bash
+
+      - name: 🛎️ Checkout (Attempt 2)
+        if: steps.checkout.outcome == 'failure'
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          fetch-tags: false
+          filter: blob:none
+        continue-on-error: true
+        id: checkout_retry_1
+
+      - name: ⏳ Wait for checkout retry 2
+        if: steps.checkout_retry_1.outcome == 'failure'
+        run: sleep 300s
+        shell: bash
+
+      - name: 🛎️ Checkout (Attempt 3)
+        if: steps.checkout_retry_1.outcome == 'failure'
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          fetch-tags: false
+          filter: blob:none
+        id: checkout_retry_2
+
+      - name: 🐍 Use Python ${{ matrix.python_version }}
+        uses: actions/setup-python@v7
+        with:
+          python-version: ${{ matrix.python_version }}
+
+      - uses: TheMrMilchmann/setup-msvc-dev@v4
+        with:
+          arch: x64
+
+      - name: 🧳 Install Pforge and dependencies
+        run: |
+          pip install --no-python-version-warning --disable-pip-version-check .
+
+      - name: Verbose scons output in compilation
+        run: |
+          set -x
+
+          cleanupEmptyModuleOutputs() {
+            rm -rf EmptyModuleTest EmptyModuleTest.*
+            rm -f EmptyModuleTest.bin EmptyModuleTest.exe
+          }
+
+          retryCompileCommand() {
+            cleanupEmptyModuleOutputs
+
+            if "$@"; then
+              return 0
+            fi
+
+            echo "Retrying once after 30 seconds to tolerate a transient runner failure."
+            sleep 30
+
+            cleanupEmptyModuleOutputs
+
+            "$@"
+            return $?
+          }
+
+          retryCompileCommand python -m pforge --mode=module --show-scons --run --report=compilation-report-module.xml --assume-yes-for-downloads --experimental=debug-report-traceback tests/basics/EmptyModuleTest.py
+          retryCompileCommand python -m pforge --mode=accelerated --show-scons --run --report=compilation-report-accelerated.xml --assume-yes-for-downloads --experimental=debug-report-traceback tests/basics/EmptyModuleTest.py
+          retryCompileCommand python -m pforge --mode=standalone --show-scons --run --report=compilation-report-standalone.xml --assume-yes-for-downloads --experimental=debug-report-traceback tests/basics/EmptyModuleTest.py
+          retryCompileCommand python -m pforge --mode=onefile --show-scons --run --report=compilation-report-onefile.xml --assume-yes-for-downloads --experimental=debug-report-traceback tests/basics/EmptyModuleTest.py
+        shell: bash
+
+      - name: Archive compilation reports for empty modules
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: compilation-reports-${{ runner.os }}-${{ matrix.python_version }}
+          path: |
+            *.xml
+
+      - name: Run Pforge test suite
+        run: |
+          Get-ChildItem env:
+          python -m pforge --version
+          python .\tests\run-tests --no-other-python --no-debug --skip-reflection-test --skip-all-cpython-tests --assume-yes-for-downloads
+
+  windows-arm:
+    needs: linux
+    runs-on: windows-11-arm
+    strategy:
+      matrix:
+        python_version:
+          - "3.11"
+          - "3.12"
+          - "3.13"
+          - "3.14"
+    name: Windows ARM Python ${{ matrix.python_version }}
+    steps:
+      - name: 🛎️ Checkout (Attempt 1)
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          fetch-tags: false
+          filter: blob:none
+        continue-on-error: true
+        id: checkout
+
+      - name: ⏳ Wait for checkout retry 1
+        if: steps.checkout.outcome == 'failure'
+        run: sleep 120s
+        shell: bash
+
+      - name: 🛎️ Checkout (Attempt 2)
+        if: steps.checkout.outcome == 'failure'
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          fetch-tags: false
+          filter: blob:none
+        continue-on-error: true
+        id: checkout_retry_1
+
+      - name: ⏳ Wait for checkout retry 2
+        if: steps.checkout_retry_1.outcome == 'failure'
+        run: sleep 300s
+        shell: bash
+
+      - name: 🛎️ Checkout (Attempt 3)
+        if: steps.checkout_retry_1.outcome == 'failure'
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          fetch-tags: false
+          filter: blob:none
+        id: checkout_retry_2
+
+      - name: 🐍 Use Python ${{ matrix.python_version }}
+        uses: actions/setup-python@v7
+        with:
+          python-version: ${{ matrix.python_version }}
+
+      - uses: TheMrMilchmann/setup-msvc-dev@v4
+        with:
+          arch: arm64
+
+      - name: 🧳 Install Pforge and dependencies
+        run: |
+          pip install --no-python-version-warning --disable-pip-version-check .
+
+      - name: Verbose scons output in compilation
+        run: |
+          set -x
+
+          cleanupEmptyModuleOutputs() {
+            rm -rf EmptyModuleTest EmptyModuleTest.*
+            rm -f EmptyModuleTest.bin EmptyModuleTest.exe
+          }
+
+          retryCompileCommand() {
+            cleanupEmptyModuleOutputs
+
+            if "$@"; then
+              return 0
+            fi
+
+            echo "Retrying once after 30 seconds to tolerate a transient runner failure."
+            sleep 30
+
+            cleanupEmptyModuleOutputs
+
+            "$@"
+            return $?
+          }
+
+          retryCompileCommand python -m pforge --mode=module --show-scons --run --report=compilation-report-module.xml --assume-yes-for-downloads --experimental=debug-report-traceback tests/basics/EmptyModuleTest.py
+          retryCompileCommand python -m pforge --mode=accelerated --show-scons --run --report=compilation-report-accelerated.xml --assume-yes-for-downloads --experimental=debug-report-traceback tests/basics/EmptyModuleTest.py
+          retryCompileCommand python -m pforge --mode=standalone --show-scons --run --report=compilation-report-standalone.xml --assume-yes-for-downloads --experimental=debug-report-traceback tests/basics/EmptyModuleTest.py
+          retryCompileCommand python -m pforge --mode=onefile --show-scons --run --report=compilation-report-onefile.xml --assume-yes-for-downloads --experimental=debug-report-traceback tests/basics/EmptyModuleTest.py
+        shell: bash
+
+      - name: Archive compilation reports for empty modules
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: compilation-reports-${{ runner.os }}-arm64-${{ matrix.python_version }}
+          path: |
+            *.xml
+
+      - name: Run Pforge test suite
+        run: |
+          Get-ChildItem env:
+          python -m pforge --version
+          python .\tests\run-tests --no-other-python --no-debug --skip-reflection-test --skip-all-cpython-tests --assume-yes-for-downloads

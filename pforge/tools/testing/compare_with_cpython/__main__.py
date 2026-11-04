@@ -1,0 +1,1107 @@
+#!/usr/bin/env python
+#     Copyright 2026, Kay Hayen, mailto:kay.hayen@gmail.com find license text at end of file
+
+
+"""Tool to compare output of CPython and Pforge."""
+
+import os
+import pickle
+import re
+import sys
+import time
+
+from pforge.__past__ import md5
+from pforge.options.OptionParsing import getPforgeProjectOptions
+from pforge.tools.testing.Common import (
+    addToPythonPath,
+    decryptOutput,
+    executeAfterTimePassed,
+    getDebugPython,
+    getTempDir,
+    getTestingCPythonOutputsCacheDir,
+    killProcessGroup,
+    test_logger,
+    traceExecutedCommand,
+    withPythonPathChange,
+)
+from pforge.tools.testing.Coverage import getCoverageRunCommand
+from pforge.tools.testing.OutputComparison import compareOutput
+from pforge.Tracing import my_print
+from pforge.utils.Execution import (
+    callProcess,
+    check_output,
+    createProcess,
+    executeProcess,
+    wrapCommandForDebuggerForSubprocess,
+)
+from pforge.utils.FileOperations import (
+    deleteFile,
+    getFileContentByLine,
+    replaceFileAtomic,
+    withTemporaryFilename,
+)
+from pforge.utils.Importing import getExtensionModuleSuffix
+from pforge.utils.Timing import StopWatchWallClock
+from pforge.utils.Utils import isMacOS
+
+
+def displayOutput(stdout, stderr):
+    if type(stdout) is not str:
+        stdout = stdout.decode("utf-8" if os.name != "nt" else "cp850")
+        stderr = stderr.decode("utf-8" if os.name != "nt" else "cp850")
+
+    my_print(stdout, end=" ")
+    if stderr:
+        my_print(stderr)
+
+
+def checkNoPermissionError(output):
+    # Forms of permission errors.
+    for candidate in (
+        b"Permission denied:",
+        b"PermissionError:",
+        b"DBPermissionsError:",
+    ):
+        if candidate in output:
+            return False
+
+    # These are localized it seems, spell-checker: ignore totest
+    if re.search(
+        b"(WindowsError|FileNotFoundError|FileExistsError|WinError 145):"
+        b".*(@test|totest|xx|Error 145)",
+        output,
+    ):
+        return False
+
+    # Give those a retry as well.
+    if b"clcache.__main__.CacheLockException" in output:
+        return False
+
+    return True
+
+
+def _getCPythonResults(cpython_cmd, send_kill):
+    stop_watch = StopWatchWallClock()
+
+    # Try a compile of times for permission denied, on Windows it can
+    # be transient.
+    for _i in range(5):
+        stop_watch.start()
+
+        with withPythonPathChange(os.getcwd()):
+            process = createProcess(command=cpython_cmd, new_group=send_kill)
+
+        if send_kill:
+            # Doing it per loop iteration hopefully, pylint: disable=cell-var-from-loop
+            executeAfterTimePassed(
+                message="Scheduling process kill in %.02fs",
+                timeout=2.0,
+                func=lambda: killProcessGroup("Uncompiled Python program", process.pid),
+            )
+
+        stdout_cpython, stderr_cpython = process.communicate()
+        exit_cpython = process.returncode
+
+        stop_watch.stop()
+
+        if checkNoPermissionError(stdout_cpython) and checkNoPermissionError(
+            stderr_cpython
+        ):
+            break
+
+        my_print("Retrying CPython due to permission problems after delay.")
+        time.sleep(2)
+
+    cpython_time = stop_watch.getDelta()
+
+    return cpython_time, stdout_cpython, stderr_cpython, exit_cpython
+
+
+def getCPythonResults(cpython_cmd, cpython_cached, force_update, send_kill):
+    # Many details, pylint: disable=too-many-locals
+
+    cached = False
+    if cpython_cached:
+        # TODO: Hashing stuff and creating cache filename is duplicate code
+        # and should be shared.
+        hash_input = " -- ".join(cpython_cmd)
+        if str is not bytes:
+            hash_input = hash_input.encode("utf8")
+
+        command_hash = md5(hash_input)
+
+        for element in cpython_cmd:
+            if os.path.exists(element):
+                with open(element, "rb") as element_file:
+                    command_hash.update(element_file.read())
+
+        hash_salt = os.getenv("PFORGE_HASH_SALT", "")
+
+        if str is not bytes:
+            hash_salt = hash_salt.encode("utf8")
+        command_hash.update(hash_salt)
+
+        if os.name == "nt" and str is bytes:
+            curdir = os.getcwdu()  # spell-checker: ignore getcwdu
+        else:
+            curdir = os.getcwd()
+
+        command_hash.update(curdir.encode("utf8"))
+
+        cache_filename = os.path.join(
+            getTestingCPythonOutputsCacheDir(), command_hash.hexdigest()
+        )
+
+        if os.path.exists(cache_filename) and not force_update:
+            try:
+                with open(cache_filename, "rb") as cache_file:
+                    (
+                        cpython_time,
+                        stdout_cpython,
+                        stderr_cpython,
+                        exit_cpython,
+                    ) = pickle.load(cache_file)
+            except Exception as e:  # pylint: disable=broad-exception-caught
+                # Cache files can be damaged, e.g. truncated or zeroed out due
+                # to a system crash while writing them, just redo the work then.
+                test_logger.warning(
+                    "Ignoring damaged CPython results cache file '%s' (%s)."
+                    % (cache_filename, e)
+                )
+            else:
+                cached = True
+
+    if not cached:
+        cpython_time, stdout_cpython, stderr_cpython, exit_cpython = _getCPythonResults(
+            cpython_cmd=cpython_cmd, send_kill=send_kill
+        )
+
+        if cpython_cached:
+            # Write the cache atomically, so that a crash cannot leave behind
+            # a partially written cache file.
+            with withTemporaryFilename(
+                prefix="cpython-results-",
+                suffix=".tmp",
+                temp_path=os.path.dirname(cache_filename),
+            ) as temp_filename:
+                with open(temp_filename, "wb") as cache_file:
+                    pickle.dump(
+                        (cpython_time, stdout_cpython, stderr_cpython, exit_cpython),
+                        cache_file,
+                    )
+
+                replaceFileAtomic(temp_filename, cache_filename)
+
+    return cpython_time, stdout_cpython, stderr_cpython, exit_cpython
+
+
+def _getExclusiveLines(filename):
+    compiled_stdout_re = re.compile(
+        br"^[ \t]*#[ \t]*pforge-test-compiled-only[ \t]*:[ \t]*stdout[ \t]*:(.*)"
+    )
+    compiled_stderr_re = re.compile(
+        br"^[ \t]*#[ \t]*pforge-test-compiled-only[ \t]*:[ \t]*stderr[ \t]*:(.*)"
+    )
+    uncompiled_stdout_re = re.compile(
+        br"^[ \t]*#[ \t]*pforge-test-uncompiled-only[ \t]*:[ \t]*stdout[ \t]*:(.*)"
+    )
+    uncompiled_stderr_re = re.compile(
+        br"^[ \t]*#[ \t]*pforge-test-uncompiled-only[ \t]*:[ \t]*stderr[ \t]*:(.*)"
+    )
+
+    result_compiled_stdout = []
+    result_compiled_stderr = []
+    result_uncompiled_stdout = []
+    result_uncompiled_stderr = []
+
+    try:
+        for line in getFileContentByLine(filename, mode="rb"):
+            for regex, target in [
+                (compiled_stdout_re, result_compiled_stdout),
+                (compiled_stderr_re, result_compiled_stderr),
+                (uncompiled_stdout_re, result_uncompiled_stdout),
+                (uncompiled_stderr_re, result_uncompiled_stderr),
+            ]:
+                match = regex.match(line)
+                if match:
+                    target.append(match.group(1).strip().decode("utf8"))
+                    break
+    except (OSError, IOError):
+        pass
+
+    return (
+        result_compiled_stdout,
+        result_compiled_stderr,
+        result_uncompiled_stdout,
+        result_uncompiled_stderr,
+    )
+
+
+def main():
+    # Of course many cases to deal with, pylint: disable=too-many-branches,too-many-locals,too-many-statements
+
+    filename = sys.argv[1]
+    args = sys.argv[2:]
+
+    def hasArg(arg):
+        if arg in args:
+            args.remove(arg)
+            return True
+        else:
+            return False
+
+    def hasArgValue(arg_option, default=None):
+        for arg in args:
+            if arg.startswith(arg_option + "="):
+                args.remove(arg)
+                return arg[len(arg_option) + 1 :]
+        return default
+
+    def hasArgValues(arg_option):
+        result = []
+
+        for arg in tuple(args):
+            if arg.startswith(arg_option + "="):
+                args.remove(arg)
+                result.append(arg[len(arg_option) + 1 :])
+
+        return result
+
+    # For output keep it
+    arguments = list(args)
+
+    for count, arg in reversed(tuple(enumerate(args))):
+        if arg.startswith("env:"):
+            setting = arg[len("env:") :]
+
+            if "=" not in setting:
+                return sys.exit("Error, malformed environment override '%s'." % arg)
+
+            env_var_name, env_var_value = setting.split("=", 1)
+
+            if not env_var_name:
+                return sys.exit("Error, malformed environment override '%s'." % arg)
+
+            os.environ[env_var_name] = env_var_value
+
+            del args[count]
+
+    extra_options = os.getenv("PFORGE_EXTRA_OPTIONS", "").split()
+
+    silent_mode = hasArg("silent")
+    ignore_stdout = hasArg("ignore_stdout")
+    ignore_stderr = hasArg("ignore_stderr")
+    ignore_warnings = hasArg("ignore_warnings")
+    expect_success = hasArg("expect_success")
+    expect_failure = hasArg("expect_failure")
+    python_debug = hasArg("python_debug") or hasArg("--python-debug")
+    package_mode = hasArg("--mode=package")
+    module_mode = hasArg("--mode=module") or hasArg("--mode=module") or package_mode
+    module_entry_point = hasArgValue("--module-entry-point")
+    coverage_mode = hasArg("coverage")
+    two_step_execution = hasArg("two_step_execution")
+    verify_signature = hasArg("verify_signature")
+    binary_python_path = hasArg("binary_python_path")
+    trace_command = (
+        hasArg("trace_command") or os.getenv("PFORGE_TRACE_COMMANDS", "0") != "0"
+    )
+    no_diffable = hasArg("no_diffable")
+    remove_output = hasArg("remove_output")
+    remove_binary = not hasArg("--keep-binary")
+    app_bundle_mode = hasArg("--mode=app") and isMacOS()
+    standalone_mode = (
+        hasArg("--standalone")
+        or hasArg("--mode=standalone")
+        or app_bundle_mode
+        or "--mode=standalone" in extra_options
+    )
+    onefile_mode = (
+        hasArg("--onefile")
+        or hasArg("--mode=onefile")
+        or "--mode=onefile" in extra_options
+    )
+    no_site = hasArg("no_site") or coverage_mode
+    report = hasArgValue("--report")
+    nofollow_imports = hasArg("recurse_none") or hasArg("--nofollow-imports")
+    follow_imports = hasArg("recurse_all") or hasArg("--follow-imports")
+    timing = hasArg("timing")
+    original_file = hasArg("original_file") or hasArg(
+        "--file-reference-choice=original"
+    )
+    runtime_file = hasArg("runtime_file") or hasArg("--file-reference-choice=runtime")
+    no_warnings = not hasArg("warnings")
+    full_compat = not hasArg("improved")
+    cpython_cached = hasArg("cpython_cache")
+    syntax_errors = hasArg("syntax_errors")
+    no_prefer_source = hasArg("--no-prefer-source")
+    no_verbose_log = hasArg("no_verbose_log")
+    no_inclusion_log = hasArg("no_inclusion_log")
+    send_kill = hasArg("--send-ctrl-c")
+    output_dir = hasArgValue("--output-dir", None)
+    include_packages = hasArgValues("--include-package")
+    include_modules = hasArgValues("--include-module")
+    python_flag_m = hasArg("--python-flag=-m")
+    python_version = hasArgValue("--python-version")
+
+    if python_version:
+        python_version = tuple(int(d) for d in python_version.split("."))
+
+    plugins_enabled = []
+    for count, arg in reversed(tuple(enumerate(args))):
+        if arg.startswith("plugin_enable:"):
+            plugins_enabled.append(arg[len("plugin_enable:") :])
+            del args[count]
+
+    plugins_disabled = []
+    for count, arg in reversed(tuple(enumerate(args))):
+        if arg.startswith("plugin_disable:"):
+            plugins_disabled.append(arg[len("plugin_disable:") :])
+            del args[count]
+
+    user_plugins = []
+    for count, arg in reversed(tuple(enumerate(args))):
+        if arg.startswith("user_plugin:"):
+            user_plugins.append(arg[len("user_plugin:") :])
+            del args[count]
+
+    nowarn_mnemonics = []
+
+    for count, arg in reversed(tuple(enumerate(args))):
+        if arg.startswith("--nowarn-mnemonic="):
+            nowarn_mnemonics.append(arg[len("--nowarn-mnemonic=") :])
+            del args[count]
+
+    if args:
+        sys.exit("Error, non understood mode(s) '%s'," % ",".join(args))
+
+    project_options = getPforgeProjectOptions(
+        logger=test_logger, filename_arg=filename, module_mode=module_mode
+    )
+
+    (
+        compiled_only_stdout,
+        compiled_only_stderr,
+        uncompiled_only_stdout,
+        uncompiled_only_stderr,
+    ) = _getExclusiveLines(filename)
+
+    decryption_project_options = []
+
+    for project_option in project_options:
+        if project_option.startswith("--encryption-key="):
+            project_option = "--encryption-key=" + os.path.abspath(
+                project_option.split("=", 1)[1]
+            )
+
+        decryption_project_options.append(project_option)
+
+    traceback_encryption = "--enable-plugin=protection" in project_options and any(
+        project_option.startswith("--encryption-key=")
+        for project_option in decryption_project_options
+    )
+
+    if "--standalone" in project_options or "--mode=standalone" in project_options:
+        standalone_mode = True
+    if "--onefile" in project_options or "--mode=onefile" in project_options:
+        standalone_mode = True
+        onefile_mode = True
+    if "--mode=app" in project_options:
+        if isMacOS():
+            standalone_mode = True
+            app_bundle_mode = True
+        else:
+            standalone_mode = True
+            onefile_mode = True
+
+    # Verify signature must happen before the binary runs and modifies the
+    # framework, so we enable two step execution.
+    if verify_signature and app_bundle_mode:
+        two_step_execution = True
+
+    # In coverage mode, we don't want to execute, and to do this only in one mode,
+    # we enable two step execution, which splits running the binary from the actual
+    # compilation:
+    if coverage_mode:
+        two_step_execution = True
+
+    # The coverage mode doesn't work with debug mode.
+    if coverage_mode:
+        python_debug = False
+
+    comparison_mode = not coverage_mode
+
+    # We need to split it, so we know when to kill.
+    if send_kill:
+        two_step_execution = True
+
+    assert not standalone_mode or not module_mode
+    assert not follow_imports or not nofollow_imports
+
+    if "PYTHONHASHSEED" not in os.environ:
+        os.environ["PYTHONHASHSEED"] = "0"
+
+    os.environ["PYTHONWARNINGS"] = "ignore"
+    os.environ["PFORGE_UPDATE_CHECK"] = "never"
+
+    if "PYTHON" not in os.environ:
+        os.environ["PYTHON"] = sys.executable
+
+    if "--mode=standalone" in extra_options:
+        extra_options.remove("--mode=standalone")
+    if "--mode=onefile" in extra_options:
+        extra_options.remove("--mode=onefile")
+
+    if os.path.normcase(os.environ["PYTHON"]).endswith(
+        ("-dbg", "-debug", "d", "_d.exe")
+    ):
+        python_debug = True
+    elif "--python-debug" in extra_options or "--python-dbg" in extra_options:
+        python_debug = True
+
+    if python_debug:
+        os.environ["PYTHON"] = getDebugPython() or os.environ["PYTHON"]
+
+    if comparison_mode:
+        my_print(
+            """\
+Comparing output of '{filename}' using '{python}' with flags {args} ...""".format(
+                filename=filename,
+                python=os.environ["PYTHON"],
+                args=", ".join(arguments),
+            )
+        )
+    else:
+        my_print(
+            """\
+Taking coverage of '{filename}' using '{python}' with flags {args} ...""".format(
+                filename=filename,
+                python=os.environ["PYTHON"],
+                args=", ".join(arguments),
+            )
+        )
+
+    if comparison_mode and not silent_mode:
+        my_print("*" * 80)
+        my_print("CPython:")
+        my_print("*" * 80)
+
+    if two_step_execution:
+        filename = os.path.abspath(filename)
+
+    if module_mode:
+        module_name = os.path.basename(filename)
+
+        if module_name.endswith(".py"):
+            module_name = module_name[:-3]
+
+        mini_script = "import %s" % module_name
+        if module_entry_point:
+            mini_script += "; %s.%s()" % (module_name, module_entry_point)
+
+        cpython_cmd = [
+            os.environ["PYTHON"],
+            "-c",
+            "import sys; sys.path.append(%s); %s"
+            % (repr(os.path.dirname(filename)), mini_script),
+        ]
+
+        if python_version and python_version >= (3, 11):
+            cpython_cmd += ["-X", "frozen_modules=off"]
+
+        if no_warnings:
+            cpython_cmd[1:1] = [
+                "-W",
+                "ignore",
+            ]
+    else:
+        cpython_cmd = [os.environ["PYTHON"]]
+
+        if no_warnings:
+            cpython_cmd[1:1] = [
+                "-W",
+                "ignore",
+            ]
+
+        if python_version and python_version >= (3, 11):
+            cpython_cmd += ["-X", "frozen_modules=off"]
+
+        if python_flag_m:
+            cpython_cmd += ["-m", os.path.basename(filename)]
+            os.chdir(os.path.dirname(filename))
+        else:
+            cpython_cmd.append(filename)
+
+    if no_site:
+        cpython_cmd.insert(1, "-S")
+
+    if "PFORGE" in os.environ:
+        # Would need to extract which "python" this is going to use.
+        assert not coverage_mode, "Not implemented for binaries."
+
+        pforge_call = [os.environ["PYTHON"], os.environ["PFORGE"]]
+    else:
+        pforge_call = [
+            os.environ["PYTHON"],
+            "-m",
+            "pforge.__main__",  # Note: Needed for Python2.6
+        ]
+
+        if coverage_mode:
+            pforge_call = getCoverageRunCommand(pforge_call)
+
+    if python_debug:
+        extra_options.append("--python-debug")
+
+    if no_warnings:
+        extra_options.append("--python-flag=no_warnings")
+
+    if remove_output:
+        extra_options.append("--remove-output")
+
+    # The default file reference mode is "original", except for module and
+    # standalone modes, where it is "runtime", so only specify the mode that
+    # is not the default one, to avoid useless informational messages.
+    runtime_mode_is_default = module_mode or standalone_mode or onefile_mode
+
+    if original_file and runtime_mode_is_default:
+        extra_options.append("--file-reference-choice=original")
+
+    if runtime_file and not runtime_mode_is_default:
+        extra_options.append("--file-reference-choice=runtime")
+
+    if full_compat:
+        extra_options.append("--full-compat")
+
+    if no_prefer_source:
+        extra_options.append("--no-prefer-source")
+
+    if python_flag_m:
+        extra_options.append("--python-flag=-m")
+
+    if coverage_mode:
+        # Coverage modules hates Pforge to re-execute, and so we must avoid
+        # that.
+        python_path = check_output(
+            [
+                os.environ["PYTHON"],
+                "-c",
+                "import sys, os; print(os.pathsep.join(sys.path))",
+            ]
+        )
+
+        if sys.version_info >= (3,):
+            python_path = python_path.decode("utf8")
+
+        os.environ["PYTHONPATH"] = python_path.strip()
+
+    if binary_python_path:
+        addToPythonPath(os.path.dirname(os.path.abspath(filename)))
+
+    if report:
+        report = os.path.abspath(report)
+        extra_options.append("--report=%s" % report)
+        deleteFile(report, must_exist=False)
+
+    if nofollow_imports or (not follow_imports and not standalone_mode):
+        extra_options.append("--nofollow-imports")
+
+    if follow_imports:
+        extra_options.append("--follow-imports")
+
+    if nowarn_mnemonics:
+        extra_options.extend("--nowarn-mnemonic=" + v for v in nowarn_mnemonics)
+
+    if coverage_mode:
+        extra_options.append("--must-not-re-execute")
+        extra_options.append("--generate-c-only")
+
+    for plugin_enabled in plugins_enabled:
+        extra_options.append("--enable-plugin=" + plugin_enabled)
+
+    for plugin_disabled in plugins_disabled:
+        extra_options.append("--disable-plugin=" + plugin_disabled)
+
+    for user_plugin in user_plugins:
+        extra_options.append("--user-plugin=" + user_plugin)
+
+    if not no_verbose_log:
+        extra_options.append("--verbose-output=%s.optimization.log" % filename)
+
+    if not no_inclusion_log:
+        extra_options.append("--show-modules-output=%s.inclusion.log" % filename)
+
+    if output_dir is not None:
+        extra_options.append("--output-dir=%s" % output_dir)
+    else:
+        # TODO: The run-tests uses PFORGE_EXTRA_OPTIONS still.
+        for extra_option in extra_options:
+            dir_match = re.search(r"--output-dir=(.*?)(\s|$)", extra_option)
+
+            if dir_match:
+                output_dir = dir_match.group(1)
+                break
+        else:
+            # The default.
+            output_dir = "."
+
+    for include_package in include_packages:
+        extra_options.append("--include-package=%s" % include_package)
+
+    for include_module in include_modules:
+        extra_options.append("--include-module=%s" % include_module)
+
+    # Progress bar is not used.
+    extra_options.append("--no-progressbar")
+
+    # Now build the command to run Pforge.
+    if not two_step_execution:
+        if package_mode:
+            extra_options.append("--mode=package")
+        elif module_mode:
+            extra_options.append("--mode=module")
+        elif onefile_mode:
+            extra_options.append("--mode=onefile")
+        elif app_bundle_mode:
+            extra_options.append("--mode=app")
+        elif standalone_mode:
+            extra_options.append("--mode=standalone")
+
+        pforge_cmd = pforge_call + extra_options + ["--run", filename]
+
+        if no_site:
+            pforge_cmd.insert(len(pforge_cmd) - 1, "--python-flag=-S")
+
+    else:
+        if package_mode:
+            pforge_cmd1 = (
+                pforge_call
+                + extra_options
+                + ["--mode=package", os.path.abspath(filename)]
+            )
+        elif module_mode:
+            pforge_cmd1 = (
+                pforge_call
+                + extra_options
+                + ["--mode=module", os.path.abspath(filename)]
+            )
+        elif onefile_mode:
+            pforge_cmd1 = pforge_call + extra_options + ["--mode=onefile", filename]
+        elif app_bundle_mode:
+            pforge_cmd1 = pforge_call + extra_options + ["--mode=app", filename]
+        elif standalone_mode:
+            pforge_cmd1 = pforge_call + extra_options + ["--mode=standalone", filename]
+        else:
+            pforge_cmd1 = pforge_call + extra_options + [filename]
+
+        if no_site:
+            pforge_cmd1.insert(len(pforge_cmd1) - 1, "--python-flag=-S")
+
+    if module_mode:
+        module_name = os.path.basename(filename)
+
+        if module_name.endswith(".py"):
+            module_name = module_name[:-3]
+
+        pforge_cmd2 = [os.environ["PYTHON"], "-W", "ignore", "-c", mini_script]
+    else:
+        exe_filename = os.path.basename(filename)
+
+        if filename.endswith(".py"):
+            exe_filename = exe_filename[:-3]
+
+        if app_bundle_mode:
+            pforge_cmd2 = [
+                os.path.join(
+                    output_dir,
+                    exe_filename + ".app",
+                    "Contents",
+                    "MacOS",
+                    exe_filename,
+                )
+            ]
+        else:
+            exe_filename = exe_filename.replace(")", "").replace("(", "")
+
+            if os.name == "nt":
+                exe_filename += ".exe"
+            else:
+                exe_filename += ".bin"
+
+            pforge_cmd2 = [os.path.join(output_dir, exe_filename)]
+
+        pdb_filename = exe_filename[:-4] + ".pdb"
+
+    if trace_command:
+        traceExecutedCommand("CPython command", cpython_cmd)
+
+    cpython_time = None
+
+    if comparison_mode:
+        cpython_time, stdout_cpython, stderr_cpython, exit_cpython = getCPythonResults(
+            cpython_cmd=cpython_cmd,
+            cpython_cached=cpython_cached,
+            force_update=False,
+            send_kill=send_kill,
+        )
+
+        if not silent_mode:
+            displayOutput(stdout_cpython, stderr_cpython)
+
+    if comparison_mode and not silent_mode:
+        my_print("*" * 80)
+        my_print("Pforge:")
+        my_print("*" * 80)
+
+    if two_step_execution:
+        if output_dir:
+            os.chdir(output_dir)
+        else:
+            tmp_dir = getTempDir()
+            os.chdir(tmp_dir)
+
+        if trace_command:
+            my_print("Going to output directory", os.getcwd())
+
+    stop_watch = StopWatchWallClock()
+    second_stage_was_run = False
+    stop_watch.start()
+
+    if not two_step_execution:
+        if trace_command:
+            traceExecutedCommand("Pforge command", pforge_cmd)
+
+        # Try a couple of times for permission denied, on Windows it can
+        # be transient.
+        for _i in range(5):
+            with withPythonPathChange(pforge_package_dir):
+                process = createProcess(command=pforge_cmd)
+
+            stdout_pforge, stderr_pforge = process.communicate()
+            exit_pforge = process.returncode
+
+            if checkNoPermissionError(stdout_pforge) and checkNoPermissionError(
+                stderr_pforge
+            ):
+                break
+
+            my_print("Retrying pforge exe due to permission problems after delay.")
+            time.sleep(2)
+
+    else:
+        if trace_command:
+            my_print("Pforge command 1:", pforge_cmd1)
+
+        for _i in range(5):
+            with withPythonPathChange(pforge_package_dir):
+                process_result = executeProcess(pforge_cmd1)
+
+                python_path_used = os.environ["PYTHONPATH"]
+
+            if process_result.exit_code != 0:
+                if (
+                    not expect_failure
+                    and not comparison_mode
+                    and not os.path.exists(".coverage")
+                ):
+                    sys.exit("""\
+Error, failed to take coverage with '%s' (PYTHONPATH was '%s').
+
+Stderr was:
+%s
+""" % (pforge_cmd1, python_path_used, process_result.stderr))
+
+                exit_pforge = process_result.exit_code
+                stdout_pforge = process_result.stdout
+                stderr_pforge = process_result.stderr
+                stdout_pforge2 = (
+                    b"not run due to compilation error:\n" + process_result.stdout
+                )
+                stderr_pforge2 = process_result.stderr
+            else:
+                if verify_signature and app_bundle_mode:
+                    app_name = os.path.splitext(os.path.basename(filename))[0]
+
+                    app_bundle_path = os.path.join(
+                        output_dir if output_dir else ".", app_name + ".app"
+                    )
+
+                    my_print(
+                        "Checking macOS code signature for app bundle '%s'."
+                        % app_bundle_path
+                    )
+
+                    verify_cmd = [
+                        "/usr/bin/codesign",
+                        "--verify",
+                        "--deep",
+                        "--strict",
+                        app_bundle_path,
+                    ]
+
+                    verify_result = callProcess(verify_cmd)
+
+                    if verify_result != 0:
+                        sys.exit("Error, app bundle code signing verification failed.")
+
+                # No execution second step for coverage mode.
+                if comparison_mode:
+                    if os.path.exists(pforge_cmd2[0][:-4] + ".cmd"):
+                        pforge_cmd2[0] = pforge_cmd2[0][:-4] + ".cmd"  # type: ignore
+
+                    if trace_command:
+                        my_print("Pforge command 2:", pforge_cmd2)
+
+                    # Need full manual control
+                    process = createProcess(command=pforge_cmd2, new_group=send_kill)
+
+                    if send_kill:
+                        # Lambda is used immediately in same loop, pylint: disable=cell-var-from-loop
+                        executeAfterTimePassed(
+                            message="Scheduling process kill in %.02fs",
+                            timeout=2.0,
+                            func=lambda: killProcessGroup(
+                                "Pforge compiled program", process.pid
+                            ),
+                        )
+
+                    stdout_pforge2, stderr_pforge2 = process.communicate()
+                    stdout_pforge = process_result.stdout + stdout_pforge2
+                    stderr_pforge = process_result.stderr + stderr_pforge2
+                    exit_pforge = process.returncode
+                    second_stage_was_run = True
+
+                    # In case of segfault or assertion triggered, run in debugger.
+                    if exit_pforge in (-11, -6) and sys.platform != "nt":
+                        pforge_cmd2 = wrapCommandForDebuggerForSubprocess(
+                            command=pforge_cmd2,
+                            debugger=os.getenv("PFORGE_DEBUGGER_CHOICE"),
+                        )
+
+                        callProcess(pforge_cmd2, shell=False)
+                else:
+                    exit_pforge = process_result.exit_code
+                    stdout_pforge = process_result.stdout
+                    stderr_pforge = process_result.stderr
+
+            if checkNoPermissionError(stdout_pforge) and checkNoPermissionError(
+                stderr_pforge
+            ):
+                break
+
+            my_print("Retrying pforge exe due to permission problems after delay.")
+            time.sleep(2)
+
+    stop_watch.stop()
+    pforge_time = stop_watch.getDelta()
+
+    if traceback_encryption:
+        with withPythonPathChange(pforge_package_dir):
+            if second_stage_was_run:
+                stderr_pforge2 = decryptOutput(
+                    decryption_project_options, stderr_pforge2
+                )
+                stdout_pforge2 = decryptOutput(
+                    decryption_project_options, stdout_pforge2
+                )
+
+            stderr_pforge = decryptOutput(decryption_project_options, stderr_pforge)
+            stdout_pforge = decryptOutput(decryption_project_options, stdout_pforge)
+
+    if not silent_mode:
+        displayOutput(stdout_pforge, stderr_pforge)
+
+        if coverage_mode:
+            assert not stdout_pforge
+            assert not stderr_pforge
+
+    if comparison_mode:
+
+        def makeComparisons(trace_result):
+            if ignore_stdout:
+                exit_code_stdout = 0
+            else:
+                exit_code_stdout = compareOutput(
+                    "stdout",
+                    stdout_cpython,
+                    stdout_pforge2 if two_step_execution else stdout_pforge,
+                    ignore_warnings,
+                    syntax_errors,
+                    no_diffable=no_diffable,
+                    compiled_only_exclusive_lines=compiled_only_stdout,
+                    uncompiled_only_exclusive_lines=uncompiled_only_stdout,
+                )
+
+            if ignore_stderr:
+                exit_code_stderr = 0
+            else:
+                exit_code_stderr = compareOutput(
+                    "stderr",
+                    stderr_cpython,
+                    stderr_pforge2 if two_step_execution else stderr_pforge,
+                    ignore_warnings,
+                    syntax_errors,
+                    no_diffable=no_diffable,
+                    compiled_only_exclusive_lines=compiled_only_stderr,
+                    uncompiled_only_exclusive_lines=uncompiled_only_stderr,
+                )
+
+            exit_code_return = exit_cpython != exit_pforge
+
+            if exit_code_return and trace_result:
+                my_print(
+                    """Exit codes %d (CPython) != %d (Pforge)"""
+                    % (exit_cpython, exit_pforge)
+                )
+
+            return exit_code_stdout, exit_code_stderr, exit_code_return
+
+        if cpython_cached:
+            exit_code_stdout, exit_code_stderr, exit_code_return = makeComparisons(
+                trace_result=False
+            )
+
+            if not int(os.getenv("PFORGE_CPYTHON_NO_CACHE_UPDATE", "0")):
+                if exit_code_stdout or exit_code_stderr or exit_code_return:
+                    old_stdout_cpython = stdout_cpython
+                    old_stderr_cpython = stderr_cpython
+                    old_exit_cpython = exit_cpython
+
+                    my_print(
+                        "Updating CPython cache by force due to non-matching comparison results.",
+                        style="yellow",
+                    )
+
+                    (
+                        cpython_time,
+                        stdout_cpython,
+                        stderr_cpython,
+                        exit_cpython,
+                    ) = getCPythonResults(
+                        cpython_cmd=cpython_cmd,
+                        cpython_cached=cpython_cached,
+                        force_update=True,
+                        send_kill=send_kill,
+                    )
+
+                    if not silent_mode:
+                        if (
+                            old_stdout_cpython != stdout_cpython
+                            or old_stderr_cpython != stderr_cpython
+                            or old_exit_cpython != exit_cpython
+                        ):
+                            displayOutput(stdout_cpython, stderr_cpython)
+
+        exit_code_stdout, exit_code_stderr, exit_code_return = makeComparisons(
+            trace_result=True
+        )
+
+        # In case of segfault, also output the call stack by entering debugger
+        # without stdin forwarded.
+        if (
+            exit_code_return
+            and exit_pforge in (-11, -6)
+            and sys.platform != "nt"
+            and not module_mode
+            and not two_step_execution
+        ):
+            pforge_cmd.insert(len(pforge_cmd) - 1, "--debugger")
+
+            with withPythonPathChange(pforge_package_dir):
+                callProcess(pforge_cmd, shell=False)
+
+        exit_code = exit_code_stdout or exit_code_stderr or exit_code_return
+
+        if exit_code:
+            problems = []
+            if exit_code_stdout:
+                problems.append("stdout")
+            if exit_code_stderr:
+                problems.append("stderr")
+            if exit_code_return:
+                problems.append("exit_code")
+
+            sys.exit("Error, results differed (%s)." % ",".join(problems))
+
+        if expect_success and exit_cpython != 0:
+            if silent_mode:
+                displayOutput(stdout_cpython, stderr_cpython)
+
+            sys.exit("Unexpected error exit from CPython.")
+
+        if expect_failure and exit_cpython == 0:
+            sys.exit("Unexpected success exit from CPython.")
+
+    if remove_output:
+        if not module_mode:
+            if os.path.exists(pforge_cmd2[0]) and remove_binary:
+                if os.name == "nt":
+                    # It appears there is a tiny lock race that we randomly cause,
+                    # likely because --run spawns a subprocess that might still
+                    # be doing the cleanup work.
+                    if os.path.exists(pforge_cmd2[0] + ".away"):
+                        os.unlink(pforge_cmd2[0] + ".away")
+
+                    for _i in range(10):
+                        try:
+                            os.rename(pforge_cmd2[0], pforge_cmd2[0] + ".away")
+                        except OSError:
+                            time.sleep(0.1)
+                            continue
+
+                    for _i in range(10):
+                        try:
+                            os.unlink(pforge_cmd2[0] + ".away")
+                        except OSError:
+                            time.sleep(2)
+                            continue
+                        else:
+                            break
+
+                    if os.path.exists(pdb_filename):
+                        os.unlink(pdb_filename)
+                else:
+                    os.unlink(pforge_cmd2[0])
+        else:
+            module_filename = os.path.basename(filename) + getExtensionModuleSuffix(
+                preferred=True
+            )
+
+            if os.path.exists(module_filename) and remove_binary:
+                os.unlink(module_filename)
+
+    if comparison_mode and timing:
+        my_print("CPython took %.2fs vs %0.2fs Pforge." % (cpython_time, pforge_time))
+
+    if comparison_mode and not silent_mode:
+        my_print("OK, same outputs.")
+
+
+pforge_package_dir = os.path.normpath(
+    os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "..", ".."))
+)
+
+
+if __name__ == "__main__":
+    # Unchanged, running from checkout, use the parent directory, the pforge
+    # package ought be there.
+    sys.path.insert(0, pforge_package_dir)
+
+    main()
+
+#     Part of "Pforge", an optimizing Python compiler that is compatible and
+#     integrates with CPython, but also works on its own.
+#
+#     Licensed under the GNU Affero General Public License, Version 3 (the "License");
+#     you may not use this file except in compliance with the License.
+#     You may obtain a copy of the License at
+#
+#        https://www.gnu.org/licenses/agpl-3.0.txt
+#
+#     See also: "Pforge Runtime Library Exception, Version 1.0" in file
+#     "LICENSE-RUNTIME.txt" for additional permissions granted under Section 7.
+#
+#     Unless required by applicable law or agreed to in writing, software
+#     distributed under the License is distributed on an "AS IS" BASIS,
+#     WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+#     See the License for the specific language governing permissions and
+#     limitations under the License.

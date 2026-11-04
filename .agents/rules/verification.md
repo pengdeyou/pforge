@@ -1,0 +1,90 @@
+# Code Quality & Workflow
+
+## Code Quality & Verification
+
+Before marking a task as complete, you must verify the changes using the project's custom tools in
+this order:
+
+- **Auto-Formatting:** Apply auto-formatting to any file you touch (Python or C).
+
+  - Command: `./bin/autoformat-pforge-source --un-pushed --assume-yes-for-downloads`
+  - On Windows, use `.\bin\autoformat-pforge-source.cmd --un-pushed --assume-yes-for-downloads`
+    instead.
+  - Prefer this exact repo-root command by default. Do not replace it with file-specific arguments
+    unless the user explicitly asks for that or there is a demonstrated need to narrow the run for
+    diagnosis.
+  - Can be run on the entire project with
+    `./bin/autoformat-pforge-source --assume-yes-for-downloads`
+  - This script applies `black`, `isort` (for Python), and `clang-format` (for C) as well as other
+    tools.
+  - On Windows, if the command fails with "Python not found", run
+    `{Python.exe} misc\vscode_config_gen.py` first to generate the config files needed.
+
+- **Linting:** You must run the project's pylint script after auto-formatting.
+
+  - Command: `./bin/check-pforge-with-pylint --un-pushed`
+  - On Windows, use `.\bin\check-pforge-with-pylint.cmd --un-pushed` instead.
+  - Prefer this exact repo-root command by default. Do not replace it with file-specific arguments
+    unless the user explicitly asks for that or there is a demonstrated need to narrow the run for
+    diagnosis.
+  - Can be run on the entire project with `./bin/check-pforge-with-pylint`
+  - *Constraint:* If pylint fails, fix the errors before asking for review. Do not suppress warnings
+    without a very strong reason.
+
+### Change-Type Verification Matrix
+
+Always run the required auto-formatting and pylint commands first. Then add focused verification for
+the changed area:
+
+| Change type           | Additional verification                                                                                  |
+| --------------------- | -------------------------------------------------------------------------------------------------------- |
+| Python change         | Run the affected test, reproducer, or nearest repository test through `bin/pforge`.                      |
+| C change              | Compile and run a representative program that exercises the changed helper or runtime path.              |
+| Package config change | Build a standalone MRE for the affected package and confirm the compiled binary imports/runs correctly.  |
+| SCons change          | Run `bin/pforge --version` and exercise `tests/basics/AssertsTest.py` in the relevant compilation modes. |
+| Release/OBS issue     | Fetch the raw OBS/build log, identify the terminal failure, and verify the changed release tooling path. |
+| CPython-suite change  | Use the matching `tests/CPython*` submodule workflow and run the changed CPython comparison test.        |
+
+- **Temporary Verification Files:**
+
+  - All temporary test scripts, reproduction scripts, and their artifacts created during
+    verification MUST be placed in `tests/scratch/`.
+  - This directory is git-ignored and ensures the repository remains clean.
+
+## Workflow
+
+- **Bugs & Implementation:**
+
+  - When fixing bugs in C code, analyze the specific Pforge internal C-API usage. Often Python C-API
+    has safer or more optimized replacements in Pforge.
+  - Calls to Python C-API are slow and generally avoided in Pforge where we can.
+  - For file operations, prefer functions in `pforge.utils.FileOperations` and add them if missing.
+
+- **Tests:**
+
+  - On Windows, ensure a suitable Python version is installed (e.g.,
+    `~/AppData/Local/Programs/Python/Python313`).
+  - Under WSL, the Windows host installs are runnable directly through `/mnt/c`, e.g.
+    `/mnt/c/Python27/python.exe` for Python 2.7 and `/mnt/c/Python26/python.exe` for Python 2.6;
+    those binaries cannot open `/home/...` paths, so copy scratch files to `/mnt/c/tmp` first.
+    Prompt the user to install if missing a suitable version.
+  - When you only need to vary Pforge command line flags for an existing repository test case,
+    prefer reusing it via `PFORGE_EXTRA_OPTIONS`.
+  - For **scons** level changes:
+    - Run `bin/pforge --version` to check basic sanity.
+    - Compile `tests/basics/AssertsTest.py` to verify correctness.
+    - Exercise modes: `--mode=accelerated`, `--mode=standalone`, `--mode=module`, `--mode=onefile`.
+    - Verify that output with `--run` matches the direct Python execution.
+
+- **Execution:**
+
+  - Use `bin/pforge` to execute Pforge, avoiding the need to manually set `PYTHONPATH`.
+  - Do not disable ccache or clache by default; they are expected to invalidate correctly, and
+    bypassing them is not a general-purpose fix.
+  - If a ccache or clache issue is suspected, stop and prompt the user before disabling or clearing
+    the cache, including the observed evidence and exact command.
+
+## Documentation & Conduct
+
+- Refer to [`Developer_Manual.rst`](../../Developer_Manual.rst) for detailed coding standards.
+- Refer to [`README.rst`](../../README.rst) for User Manual and usage context.

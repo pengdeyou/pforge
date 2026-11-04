@@ -1,0 +1,3 @@
+version=3
+opts=dversionmangle=s/\+ds$//,uversionmangle=s/pre/~pre/,pgpsigurlmangle=s/$/.sig/ \
+   https://pforge.net/releases/Pforge-([\d\.]+).tar.gz debian uupdate

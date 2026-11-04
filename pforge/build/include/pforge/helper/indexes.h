@@ -1,0 +1,53 @@
+//     Copyright 2026, Kay Hayen, mailto:kay.hayen@gmail.com find license text at end of file
+
+#pragma once
+#ifndef __PFORGE_HELPER_INDEXES_H__
+#define __PFORGE_HELPER_INDEXES_H__
+
+/* This file is included from another C file, help IDEs to still parse it on its own. */
+#ifdef __IDE_ONLY__
+#include "pforge/cpython_api_compat.h"
+#endif
+
+// Avoid the API version of "PyIndex_Check" with this.
+#if PYTHON_VERSION >= 0x380
+static inline bool Pforge_Index_Check(PyObject *obj) {
+    PyNumberMethods *tp_as_number = Py_TYPE(obj)->tp_as_number;
+
+    return (tp_as_number != NULL && tp_as_number->nb_index != NULL);
+}
+#else
+#define Pforge_Index_Check(obj) PyIndex_Check(obj)
+#endif
+
+// Similar to "PyNumber_Index" but "Pforge_Number_IndexAsLong" could be more relevant
+extern PyObject *Pforge_Number_Index(PyObject *item);
+extern Py_ssize_t Pforge_Number_AsSsize_t(PyObject *item, PyObject *exc);
+
+// In Python 3.10 or higher, the conversion to long is forced, but sometimes we
+// do not care at all, or it should not be done.
+#if PYTHON_VERSION >= 0x3a0
+extern PyObject *Pforge_Number_IndexAsLong(PyObject *item);
+#else
+#define Pforge_Number_IndexAsLong(item) Pforge_Number_Index(item)
+#endif
+
+#endif
+
+//     Part of "Pforge", an optimizing Python compiler that is compatible and
+//     integrates with CPython, but also works on its own.
+//
+//     Licensed under the GNU Affero General Public License, Version 3 (the "License");
+//     you may not use this file except in compliance with the License.
+//     You may obtain a copy of the License at
+//
+//        https://www.gnu.org/licenses/agpl-3.0.txt
+//
+//     See also: "Pforge Runtime Library Exception, Version 1.0" in file
+//     "LICENSE-RUNTIME.txt" for additional permissions granted under Section 7.
+//
+//     Unless required by applicable law or agreed to in writing, software
+//     distributed under the License is distributed on an "AS IS" BASIS,
+//     WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+//     See the License for the specific language governing permissions and
+//     limitations under the License.

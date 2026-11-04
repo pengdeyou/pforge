@@ -1,0 +1,111 @@
+#!/usr/bin/python
+#     Copyright 2026, Kay Hayen, mailto:kay.hayen@gmail.com find license text at end of file
+
+
+"""Small tool to create a pbuilder image for Pforge private CI mainly."""
+
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
+
+debian, codename, output = sys.argv[1:]
+
+if "-" in codename:
+    codename, arch = codename.split("-")
+else:
+    arch = subprocess.check_output("dpkg-architecture -q DEB_HOST_ARCH".split()).strip()
+
+    if str is not bytes:
+        arch = arch.decode("utf8")
+
+start_dir = os.getcwd()
+
+stage = tempfile.mkdtemp()
+
+try:
+    os.chdir(stage)
+
+    if debian == "debian":
+        if codename in ("jessie", "stretch", "buster"):
+            # These releases are no longer on the regular mirror.
+            mirror = "http://archive.debian.org/debian"
+        else:
+            # Certificate for https is not good.
+            mirror = "http://ftp.us.debian.org/debian"
+
+        components = "main"
+    elif debian == "ubuntu":
+        if codename in ("groovy", "impish", "kinetic", "oracular"):
+            # These releases are no longer on the regular mirror.
+            mirror = "http://old-releases.ubuntu.com/ubuntu"
+        else:
+            mirror = "http://de.archive.ubuntu.com/ubuntu"
+
+        components = "main,universe"
+    else:
+        assert False, debian
+
+    subprocess.check_call(
+        [
+            "debootstrap",  # spell-checker: ignore debootstrap
+            # The pbuilder dependency resolution needs aptitude and
+            # build-essential.
+            "--include=aptitude,build-essential,ccache,dpkg-dev",
+            "--arch=" + arch,
+            "--components=" + components,
+            codename,
+            "chroot",
+            mirror,
+        ]
+    )
+
+    subprocess.check_output(["rm", "-rf", "chroot/var/cache/apt/archives"])
+
+    os.makedirs("chroot/var/cache/apt/archives")
+
+    os.makedirs("chroot/etc/apt.conf.d")
+    with open("chroot/etc/apt.conf.d/75mine", "w", encoding="utf8") as output_file:
+        output_file.write('Acquire::Languages "none";\n')
+
+    if debian == "debian" and codename == "jessie":
+        # The archive signing key of jessie is expired, apt refuses its
+        # packages without the archive being trusted explicitly.
+        sources_list_filename = "chroot/etc/apt/sources.list"
+
+        with open(sources_list_filename, "r", encoding="utf8") as input_file:
+            sources_list = input_file.read()
+
+        sources_list = sources_list.replace(
+            "deb %s" % mirror, "deb [trusted=yes] %s" % mirror
+        )
+
+        with open(sources_list_filename, "w", encoding="utf8") as output_file:
+            output_file.write(sources_list)
+
+    target_filename = codename + ".tgz"
+    subprocess.check_call(["tar", "czf", target_filename, "-C", "chroot", "."])
+
+    shutil.copy(target_filename, os.path.join(start_dir, output))
+finally:
+    os.chdir(start_dir)
+    shutil.rmtree(stage)
+
+#     Part of "Pforge", an optimizing Python compiler that is compatible and
+#     integrates with CPython, but also works on its own.
+#
+#     Licensed under the GNU Affero General Public License, Version 3 (the "License");
+#     you may not use this file except in compliance with the License.
+#     You may obtain a copy of the License at
+#
+#        https://www.gnu.org/licenses/agpl-3.0.txt
+#
+#     See also: "Pforge Runtime Library Exception, Version 1.0" in file
+#     "LICENSE-RUNTIME.txt" for additional permissions granted under Section 7.
+#
+#     Unless required by applicable law or agreed to in writing, software
+#     distributed under the License is distributed on an "AS IS" BASIS,
+#     WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+#     See the License for the specific language governing permissions and
+#     limitations under the License.

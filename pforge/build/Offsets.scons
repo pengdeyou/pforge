@@ -1,0 +1,189 @@
+# -*- python -*-
+#     Copyright 2026, Kay Hayen, mailto:kay.hayen@gmail.com find license text at end of file
+
+
+"""
+The Offset scons file. If you have Scons or platform knowledge, please be
+especially invited and contribute improvements.
+
+This file is used to build an executable that outputs data about offsets, it is
+needed to make up for differences in offsets of structures for the Python
+headers between MSVC and MinGW64, that can only be accounted for with a
+structure that is generated and achieves same layout for MinGW64 despite the
+internals being different. As of Python3.13, internal only structures do not
+enforce layouts of all structures anymore.
+"""
+
+# Make pforge package importable from calling installation
+
+import os
+import sys
+import types
+
+sys.modules["pforge"] = types.ModuleType("pforge")
+sys.modules["pforge"].__path__ = [os.environ["PFORGE_PACKAGE_DIR"]]
+
+# We are in the build.build package really.
+import pforge.build  # pylint: disable=unused-import
+
+__package__ = "pforge.build"  # pylint: disable=redefined-builtin
+
+# isort:start
+
+from pforge.Tracing import scons_logger
+from pforge.utils.FileOperations import getExternalUsePath
+
+from .SconsCompilerSettings import (
+    createPforgeSconsEnvironment,
+    reportCCompiler,
+    setupCCompiler,
+)
+from .SconsControl import executeSconsBuild
+from .SconsPythonBuild import (
+    addPythonHaclLib,
+    addWin32PythonLib,
+    applyPythonBuildSettings,
+)
+from .SconsSourceIndex import getSourceFilenamesFromIndex
+from .SconsUtils import (
+    getArgumentList,
+    getArgumentRequired,
+    makeResultPathFileSystemEncodable,
+)
+
+# spell-checker: ignore cppdefines,cpppath
+
+# Set up the basic stuff.
+# Set up the basic stuff.
+env = createPforgeSconsEnvironment()
+env.low_memory = False
+env.debug_mode = False
+env.debugger_mode = False
+env.unstripped_mode = False
+env.console_mode = "force"
+env.resource_mode = "absent"
+
+# The directory used for building.
+
+# The name of executable that we are supposed to produce.
+result_exe = getArgumentRequired("result_exe")
+
+# Python version to target.
+python_version_str = getArgumentRequired("python_version")
+python_version = tuple(int(d) for d in python_version_str.split("."))
+
+# Python debug mode: reference count checking, assertions in CPython core.
+
+
+# Report the C compiler used.
+reportCCompiler(env, "Backend", scons_logger.info)
+
+# Set up C compiler settings.
+setupCCompiler(
+    env=env,
+    pgo_mode="no",
+    exe_target=True,
+    onefile_compile=False,
+)
+
+
+# Home of Python to be compiled against, used to find tools like clcache and
+# ccache, no linking against Python is needed here.
+python_prefix = getArgumentRequired("python_prefix")
+
+python_prefix_external = getExternalUsePath(python_prefix)
+
+
+# From statically compiled modules of the Python
+link_module_libs = getArgumentList("link_module_libs", "")
+
+if env.target_os != "WASI" and not env.msvc_mode:
+    env.Append(LIBS=["m"])
+
+if env.python_debug:
+    env.Append(CPPDEFINES=["Py_DEBUG"])
+
+if env.static_libpython:
+    env.Append(CPPDEFINES=["Py_NO_ENABLE_SHARED"])
+
+# To support self-built Python on Windows, need to also add the "PC" directory,
+# that a normal install won't have.
+if os.name == "nt":
+    python_header_path = os.path.join(python_prefix_external, "PC")
+
+    if os.path.exists(python_header_path):
+        env.Append(CPPPATH=[python_header_path])
+
+if env.monolithpy:
+    env.Append(CPPDEFINES=["_MONOLITHPY"])
+
+if env.static_libpython:
+    env.Append(CPPDEFINES=["_PFORGE_STATIC_LIBPYTHON"])
+
+applyPythonBuildSettings(env)
+
+link_module_libs = addPythonHaclLib(env, link_module_libs=link_module_libs)
+
+# TODO: Make backend libpython handling reusable.
+if env.gcc_mode and env.static_libpython:
+    env.Append(LIBS=[env.File(env.static_libpython)])
+elif os.name == "nt":
+    addWin32PythonLib(env)
+
+# The static include files reside in Pforge installation, which may be where
+# the "pforge.build" package lives.
+pforge_include = os.path.join(env.pforge_src, "include")
+
+if not os.path.exists(os.path.join(pforge_include, "pforge", "prelude.h")):
+    scons_logger.sysexit(
+        "Error, cannot locate Pforge includes at '%s', this is a broken Pforge installation."
+        % pforge_include
+    )
+
+# We have include files in the build directory and the static include directory
+# that is located inside Pforge installation.
+env.Append(
+    CPPPATH=[
+        env.source_dir,
+        pforge_include,
+        os.path.join(env.pforge_src, "static_src"),
+        os.path.join(env.pforge_src, "inline_copy", "libbacktrace"),
+    ]
+)
+
+
+source_filenames = getSourceFilenamesFromIndex(env=env, source_dir=env.source_dir)
+
+# Remove the target file to avoid cases where it falsely doesn't get rebuild and
+# then lingers from previous builds, and also workaround for MinGW64 not
+# supporting unicode result paths for "-o" basename.
+result_exe = makeResultPathFileSystemEncodable(env=env, result_exe=result_exe)
+
+target = env.Program(result_exe, source_filenames)
+
+
+executeSconsBuild(
+    env=env,
+    target=target,
+    source_filenames=source_filenames,
+    progressbar_name=env.progressbar_name,
+    stable_include_paths=False,
+)
+
+#     Part of "Pforge", an optimizing Python compiler that is compatible and
+#     integrates with CPython, but also works on its own.
+#
+#     Licensed under the GNU Affero General Public License, Version 3 (the "License");
+#     you may not use this file except in compliance with the License.
+#     You may obtain a copy of the License at
+#
+#        https://www.gnu.org/licenses/agpl-3.0.txt
+#
+#     See also: "Pforge Runtime Library Exception, Version 1.0" in file
+#     "LICENSE-RUNTIME.txt" for additional permissions granted under Section 7.
+#
+#     Unless required by applicable law or agreed to in writing, software
+#     distributed under the License is distributed on an "AS IS" BASIS,
+#     WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+#     See the License for the specific language governing permissions and
+#     limitations under the License.

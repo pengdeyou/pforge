@@ -1,0 +1,610 @@
+//     Copyright 2026, Kay Hayen, mailto:kay.hayen@gmail.com find license text at end of file
+
+#pragma once
+#ifndef __PFORGE_PRELUDE_H__
+#define __PFORGE_PRELUDE_H__
+
+// This file bundles includes and may itself be unused, so it is kept
+// deliberately.
+// IWYU pragma: always_keep
+
+#ifdef _MONOLITHPY
+// MonolithPy VFS support needs to be included as early as possible.
+#include "mp_embed.h"
+#endif
+
+#ifdef __PFORGE_NO_ASSERT__
+#undef NDEBUG
+#define NDEBUG
+#endif
+
+#include "pforge/debug_settings.h"
+
+#if defined(_WIN32)
+// Note: Keep this separate line, must be included before other Windows headers.
+#include <windows.h>
+#endif
+
+/* Include the CPython version numbers, and define our own take of what version
+ * numbers should be.
+ */
+#include <patchlevel.h>
+
+/* Use a hex version of our own to compare for versions. We do not care about pre-releases */
+#ifndef __IDE_ONLY__
+#if PY_MICRO_VERSION < 16
+#define PYTHON_VERSION (PY_MAJOR_VERSION * 256 + PY_MINOR_VERSION * 16 + PY_MICRO_VERSION)
+#else
+#define PYTHON_VERSION (PY_MAJOR_VERSION * 256 + PY_MINOR_VERSION * 16 + 15)
+#endif
+#endif
+
+#include "pforge/cpython_api_compat.h"
+
+#include <stdint.h>
+
+#ifdef Py_GIL_DISABLED
+#include <pyatomic.h>
+#endif
+
+// Python 3.11 headers give these warnings
+#if defined(_MSC_VER)
+#pragma warning(push)
+#pragma warning(disable : 4200)
+#pragma warning(disable : 4244)
+#endif
+
+/* Include the relevant Python C-API header files. */
+#include <frameobject.h>
+#include <marshal.h>
+#include <methodobject.h>
+#include <osdefs.h>
+#include <structseq.h>
+
+#if PYTHON_VERSION < 0x3a0
+#include <pydebug.h>
+#endif
+
+#include "pforge/defines.h"
+
+// We are not following the 3.10 change to an inline function. At least
+// not immediately.
+#if PYTHON_VERSION >= 0x3a0 && PYTHON_VERSION < 0x3c0
+#undef Py_REFCNT
+#define Py_REFCNT(ob) (_PyObject_CAST(ob)->ob_refcnt)
+#endif
+
+// We are using this new macro on old code too.
+#ifndef Py_SET_REFCNT
+#define Py_SET_REFCNT(ob, refcnt) Py_REFCNT(ob) = refcnt
+#endif
+
+// Pforge_GetRuntimeVersion is provided by "pforge/gc_runtime.h", which is included after the
+// internal CPython headers below.
+
+#if _PFORGE_MODULE_MODE && PYTHON_VERSION >= 0x3e0 && PYTHON_VERSION < 0x3f0 && !defined(Py_GIL_DISABLED)
+// 'pycore_tuple.h' expands '_PyObject_GC_TRACK()' in inline helpers, so the
+// Pforge runtime-aware replacements must be declared before that header is
+// included.
+PFORGE_MAY_BE_UNUSED static inline void Pforge_GC_Track(void *raw_op);
+PFORGE_MAY_BE_UNUSED static inline void Pforge_GC_UnTrack(void *raw_op);
+#endif
+
+#if defined(_WIN32)
+// Windows is too difficult for API redefines.
+#define MIN_PYCORE_PYTHON_VERSION 0x380
+#else
+#define MIN_PYCORE_PYTHON_VERSION 0x371
+#endif
+
+#if PYTHON_VERSION >= MIN_PYCORE_PYTHON_VERSION
+#define PFORGE_USE_PYCORE_THREAD_STATE
+#endif
+
+#ifdef PFORGE_USE_PYCORE_THREAD_STATE
+#undef Py_BUILD_CORE
+#ifndef Py_BUILD_CORE
+#define Py_BUILD_CORE
+#endif
+#if PYTHON_VERSION >= 0x3f0
+#define Py_BUILD_CORE_MODULE
+#endif
+#undef _PyGC_FINALIZED
+
+#if PYTHON_VERSION < 0x380
+#undef Py_ATOMIC_H
+#include <pyatomic.h>
+#undef Py_INTERNAL_PYSTATE_H
+#include <internal/pystate.h>
+#undef Py_STATE_H
+#include <pystate.h>
+
+extern _PyRuntimeState _PyRuntime;
+#else
+
+#if PYTHON_VERSION >= 0x3c0
+#include <internal/pycore_runtime.h>
+#include <internal/pycore_typeobject.h>
+#include <internal/pycore_typevarobject.h>
+
+// Changed internal type access for Python3.13
+#if PYTHON_VERSION < 0x3d0
+#define managed_static_type_state static_builtin_state
+#endif
+
+// 'pycore_object.h' uses '_PyStaticType_GetState()' in inline helpers, so the
+// Pforge replacement must be visible before that header is included.
+PFORGE_MAY_BE_UNUSED static inline managed_static_type_state *Pforge_PyStaticType_GetState(PyInterpreterState *interp,
+                                                                                           PyTypeObject *self);
+
+#define _PyStaticType_GetState(interp, self) Pforge_PyStaticType_GetState(interp, self)
+#endif
+
+#include <internal/pycore_pystate.h>
+#endif
+
+#if PYTHON_VERSION >= 0x390
+#include <internal/pycore_ceval.h>
+#include <internal/pycore_interp.h>
+#include <internal/pycore_runtime.h>
+#endif
+
+#if PYTHON_VERSION >= 0x380
+#include <cpython/initconfig.h>
+#include <internal/pycore_initconfig.h>
+#include <internal/pycore_pathconfig.h>
+#include <internal/pycore_pyerrors.h>
+#endif
+
+#if PYTHON_VERSION >= 0x3a0
+#include <internal/pycore_long.h>
+#include <internal/pycore_moduleobject.h>
+#endif
+
+#if PYTHON_VERSION >= 0x3b0
+#include <internal/pycore_dict.h>
+#include <internal/pycore_frame.h>
+#include <internal/pycore_gc.h>
+#endif
+
+// Uncompiled generator integration requires these.
+#if PYTHON_VERSION >= 0x3b0
+#if PYTHON_VERSION >= 0x3d0
+#include <internal/pycore_opcode_utils.h>
+#include <opcode_ids.h>
+#else
+#include <internal/pycore_opcode.h>
+#endif
+// Clashes with our helper names.
+#undef CALL_FUNCTION
+#endif
+
+#if PYTHON_VERSION >= 0x3c0
+#include <cpython/code.h>
+#endif
+
+#if PYTHON_VERSION < 0x3c0
+// Make sure we go the really fast variant, spell-checker: ignore gilstate
+#undef PyThreadState_GET
+#define _PyThreadState_Current _PyRuntime.gilstate.tstate_current
+#define PyThreadState_GET() ((PyThreadState *)_Py_atomic_load_relaxed(&_PyThreadState_Current))
+#endif
+
+#if PYTHON_VERSION >= 0x380
+#undef _PyObject_LookupSpecial
+#include <internal/pycore_object.h>
+#else
+#include <objimpl.h>
+#endif
+
+#if PYTHON_VERSION >= 0x3c0
+#include <internal/pycore_global_objects.h>
+#endif
+
+#if PYTHON_VERSION >= 0x3d0
+#include <internal/pycore_critical_section.h>
+#include <internal/pycore_freelist.h>
+#include <internal/pycore_intrinsics.h>
+#include <internal/pycore_modsupport.h>
+#include <internal/pycore_parking_lot.h>
+#include <internal/pycore_pyatomic_ft_wrappers.h>
+#include <internal/pycore_pylifecycle.h>
+#include <internal/pycore_setobject.h>
+#include <internal/pycore_time.h>
+#endif
+
+#if PYTHON_VERSION >= 0x3e0
+#include "internal/pycore_object_alloc.h"
+#include <internal/pycore_interpframe.h>
+#include <internal/pycore_interpolation.h>
+#include <internal/pycore_list.h>
+#include <internal/pycore_template.h>
+#include <internal/pycore_tuple.h>
+#include <internal/pycore_typedefs.h>
+#include <internal/pycore_unicodeobject.h>
+#endif
+
+#if defined(Py_GIL_DISABLED) && PYTHON_VERSION >= 0x3d0 && PYTHON_VERSION < 0x3e0
+#include "internal/pycore_object_alloc.h"
+#endif
+
+#ifndef __IDE_ONLY__
+// IDEs keep the define, so they can still parse private headers included later.
+#undef Py_BUILD_CORE
+#endif
+
+#endif
+
+#include "pforge/gc_runtime.h"
+
+#ifdef _PFORGE_ADAPTED_PYTHON_HEADERS
+/* Cross-compiler offset access and runtime abstraction layer */
+#include "pforge/python_internals_access.h"
+#else
+#if PYTHON_VERSION >= 0x3c0
+#define Pforge_PyRuntime__imports (&_PyRuntime.imports)
+#define Pforge_PyRuntime__static_objects (&_PyRuntime.static_objects)
+#endif
+#endif
+
+#if PYTHON_VERSION >= 0x3c0
+static inline size_t Pforge_static_builtin_index_get(PyTypeObject *self) { return (size_t)self->tp_subclasses - 1; }
+
+static inline struct types_state *Pforge_PyInterpreterState_GetTypesState(PyInterpreterState *interp) {
+#if PYTHON_VERSION >= 0x3e0 && PYTHON_VERSION < 0x3f0
+    return (struct types_state *)Pforge_PyInterpreterState_AdjustPostQsbrPointer(&interp->types);
+#else
+    return &interp->types;
+#endif
+}
+
+static inline struct _Py_dict_state *Pforge_PyInterpreterState_GetDictState(PyInterpreterState *interp) {
+#if PYTHON_VERSION >= 0x3e0 && PYTHON_VERSION < 0x3f0
+    return (struct _Py_dict_state *)Pforge_PyInterpreterState_AdjustPostQsbrPointer(&interp->dict_state);
+#else
+    return &interp->dict_state;
+#endif
+}
+
+#if PYTHON_VERSION >= 0x3d0
+PFORGE_MAY_BE_UNUSED static inline struct _Py_mem_interp_free_queue *
+Pforge_PyInterpreterState_GetMemFreeQueue(PyInterpreterState *interp) {
+#if PYTHON_VERSION >= 0x3e0 && PYTHON_VERSION < 0x3f0
+    return (struct _Py_mem_interp_free_queue *)Pforge_PyInterpreterState_AdjustPostQsbrPointer(&interp->mem_free_queue);
+#else
+    return &interp->mem_free_queue;
+#endif
+}
+
+// Python 3.13 uses the global stop-the-world state for delayed memory frees,
+// while Python 3.14 and 3.15 use the per-interpreter state.
+PFORGE_MAY_BE_UNUSED static inline struct _stoptheworld_state *Pforge_GetStopTheWorld(void) {
+#if PYTHON_VERSION >= 0x3e0
+#if PYTHON_VERSION < 0x3f0
+    return (struct _stoptheworld_state *)Pforge_PyInterpreterState_AdjustPostGcPointer(
+        &_PyInterpreterState_GET()->stoptheworld);
+#else
+    return &_PyInterpreterState_GET()->stoptheworld;
+#endif
+#elif defined(_PFORGE_ADAPTED_PYTHON_HEADERS)
+    return PFORGE_PYRUNTIME_DYNAMIC(_Pforge_PyRuntime_PTR, stoptheworld, struct _stoptheworld_state);
+#else
+    return &_PyRuntime.stoptheworld;
+#endif
+}
+#endif
+
+static inline managed_static_type_state *Pforge_static_builtin_state_get(PyInterpreterState *interp,
+                                                                         PyTypeObject *self) {
+    struct types_state *types_state = Pforge_PyInterpreterState_GetTypesState(interp);
+
+#if PYTHON_VERSION < 0x3d0
+    return &types_state->builtins[Pforge_static_builtin_index_get(self)];
+#else
+    return &types_state->builtins.initialized[Pforge_static_builtin_index_get(self)];
+#endif
+}
+
+PFORGE_MAY_BE_UNUSED static inline managed_static_type_state *Pforge_PyStaticType_GetState(PyInterpreterState *interp,
+                                                                                           PyTypeObject *self) {
+    assert(self->tp_flags & _Py_TPFLAGS_STATIC_BUILTIN);
+    return Pforge_static_builtin_state_get(interp, self);
+}
+#endif
+
+#if defined(_MSC_VER)
+#pragma warning(pop)
+#endif
+
+/* Include the C header files most often used. */
+#include <stdio.h>
+
+#if defined(_MSC_VER)
+/* Using "_alloca" extension due to MSVC restrictions for array variables
+ * on the local stack.
+ */
+#include <malloc.h>
+#define PFORGE_DYNAMIC_ARRAY_DECL(VARIABLE_NAME, ELEMENT_TYPE, COUNT)                                                  \
+    ELEMENT_TYPE *VARIABLE_NAME = (ELEMENT_TYPE *)_alloca(sizeof(ELEMENT_TYPE) * (COUNT));
+#elif defined(__ZIG__)
+#define PFORGE_DYNAMIC_ARRAY_DECL(VARIABLE_NAME, ELEMENT_TYPE, COUNT)                                                  \
+    ELEMENT_TYPE VARIABLE_NAME[((COUNT) == 0) ? 1 : (COUNT)];
+#else
+#define PFORGE_DYNAMIC_ARRAY_DECL(VARIABLE_NAME, ELEMENT_TYPE, COUNT) ELEMENT_TYPE VARIABLE_NAME[COUNT];
+#endif
+
+/* Python3 removed PyInt instead of renaming PyLong, and PyObject_Str instead
+ * of renaming PyObject_Unicode. Define this to be easily portable.
+ */
+#if PYTHON_VERSION >= 0x300
+#define PyInt_AsLong PyLong_AsLong
+#define PyInt_FromSsize_t PyLong_FromSsize_t
+
+#define PyNumber_Int PyNumber_Long
+
+#define PyObject_Unicode PyObject_Str
+
+#endif
+
+#include "pforge/string_functions.h"
+
+// Wrap the type lookup for debug mode, to identify errors, and potentially
+// to make our own enhancement later on. For now only verify it is not being
+// called with an error set, which 3.9 asserts against in core code.
+#ifdef __PFORGE_NO_ASSERT__
+#define Pforge_TypeLookup(x, y) _PyType_Lookup(x, y)
+#else
+PFORGE_MAY_BE_UNUSED static PyObject *Pforge_TypeLookup(PyTypeObject *type, PyObject *name) {
+    return _PyType_Lookup(type, name);
+}
+
+#endif
+
+/* With the idea to reduce the amount of exported symbols in the DLLs, make it
+ * clear that the module "init" function should of course be exported, but not
+ * for executable, where we call it ourselves from the main code.
+ */
+
+#if PYTHON_VERSION < 0x300
+#define PFORGE_MODULE_ENTRY_FUNCTION void
+#else
+#define PFORGE_MODULE_ENTRY_FUNCTION PyObject *
+#endif
+
+#if PYTHON_VERSION < 0x300
+typedef long Py_hash_t;
+#endif
+
+/* These two express if a directly called function should be exported (C level)
+ * or if it can be local to the file.
+ */
+#define PFORGE_CROSS_MODULE
+#define PFORGE_LOCAL_MODULE static
+
+// Pforge_Py_ScheduleGC and Pforge_GC_UsesGeneration0List are provided by
+// "pforge/gc_runtime.h".
+
+#if _PFORGE_EXPERIMENTAL_FAST_THREAD_GET && PYTHON_VERSION >= 0x300 && PYTHON_VERSION < 0x370
+// We are careful, access without locking under the assumption that we hold
+// the GIL over uses of this or the same thread continues to execute code of
+// ours.
+#undef PyThreadState_GET
+extern PyThreadState *_PyThreadState_Current;
+#define PyThreadState_GET() (_PyThreadState_Current)
+#endif
+
+#ifndef _PFORGE_FULL_COMPAT
+// Remove useless recursion control guards, except for testing mode, we do not
+// want them and we have no need for them as we are achieving deeper recursion
+// anyway.
+#undef Py_EnterRecursiveCall
+#define Py_EnterRecursiveCall(arg) (0)
+#undef Py_LeaveRecursiveCall
+#define Py_LeaveRecursiveCall()
+#endif
+
+#if PYTHON_VERSION < 0x300
+#define TP_RICHCOMPARE(t) (PyType_HasFeature((t), Py_TPFLAGS_HAVE_RICHCOMPARE) ? (t)->tp_richcompare : NULL)
+#else
+#define TP_RICHCOMPARE(t) ((t)->tp_richcompare)
+#endif
+
+// For older Python we need to define this ourselves.
+#ifndef Py_ABS
+#define Py_ABS(x) ((x) < 0 ? -(x) : (x))
+#endif
+
+#ifndef Py_MIN
+#define Py_MIN(x, y) (((x) > (y)) ? (y) : (x))
+#endif
+
+#ifndef Py_MAX
+#define Py_MAX(x, y) (((x) > (y)) ? (x) : (y))
+#endif
+
+#ifndef Py_SET_SIZE
+#define Py_SET_SIZE(op, size) ((PyVarObject *)(op))->ob_size = size
+#endif
+
+#ifndef PyFloat_SET_DOUBLE
+#define PyFloat_SET_DOUBLE(op, value) ((PyFloatObject *)(op))->ob_fval = value
+#endif
+
+#ifndef Py_NewRef
+static inline PyObject *_Py_NewRef(PyObject *obj) {
+    Py_INCREF(obj);
+    return obj;
+}
+
+static inline PyObject *_Py_XNewRef(PyObject *obj) {
+    Py_XINCREF(obj);
+    return obj;
+}
+
+#define Py_NewRef(obj) _Py_NewRef((PyObject *)(obj))
+#define Py_XNewRef(obj) _Py_XNewRef((PyObject *)(obj))
+#endif
+
+// For older Python, we don't have a feature "CLASS" anymore, that's implied now.
+#if PYTHON_VERSION < 0x300
+#define PforgeType_HasFeatureClass(descr) (PyType_HasFeature(Py_TYPE(descr), Py_TPFLAGS_HAVE_CLASS))
+#else
+#define PforgeType_HasFeatureClass(descr) (1)
+#endif
+
+#ifdef Py_GIL_DISABLED
+#define LOCK_KEYS(keys) PyMutex_Lock(&keys->dk_mutex)
+#define UNLOCK_KEYS(keys) PyMutex_Unlock(&keys->dk_mutex)
+#else
+#define LOCK_KEYS(keys)
+#define UNLOCK_KEYS(keys)
+#endif
+
+#include "pforge/allocator.h"
+
+// Forward declaration for the canonical dictionary insertion helper, used by
+// exception handling before the full dictionary helpers are available.
+extern bool DICT_SET_ITEM(PyObject *dict, PyObject *key, PyObject *value);
+
+#include "pforge/exceptions.h"
+
+// The digit types
+#if PYTHON_VERSION < 0x300
+#include <longintrepr.h>
+
+#if PYTHON_VERSION < 0x270
+// Not present in Python2.6 yet, spell-checker: ignore sdigit
+typedef signed int sdigit;
+#endif
+#endif
+
+// Standard way to cast PyCFunctionWithKeywords to PyCFunction without
+// triggering compiler warnings about mismatched function types. To preserve
+// type safety, we assert that the passed function actually matches
+// PyCFunctionWithKeywords using a ternary operator conditional that forces the
+// compiler to check the input type. The strict clang warning is suppressed
+// only around the expansion, as the type pun is intentional and required.
+#if defined(__clang__)
+#define CAST_METHOD_KW(func)                                                                                           \
+    _Pragma("clang diagnostic push") _Pragma("clang diagnostic ignored \"-Wcast-function-type-strict\"")(PyCFunction)( \
+        void (*)(void))(1 ? (func) : (PyCFunctionWithKeywords)(func))_Pragma("clang diagnostic pop")
+#else
+#define CAST_METHOD_KW(func) (PyCFunction)(void (*)(void))(1 ? (func) : (PyCFunctionWithKeywords)(func))
+#endif
+
+// For calling method functions of a method table with their actual signature
+// without casting between function pointer types, which newer compilers warn
+// about. The union does the type pun without a cast, which is well defined for
+// function pointers.
+typedef union Pforge_PyCFunctionUnion {
+    PyCFunction as_function;
+    PyCFunctionWithKeywords as_function_kw;
+#if PYTHON_VERSION >= 0x360
+    _PyCFunctionFast as_function_fast;
+#endif
+} Pforge_PyCFunctionUnion;
+
+// A long value that represents a signed digit on the helper interface.
+typedef long pforge_digit;
+
+#include "pforge/helpers.h"
+
+#include "pforge/compiled_frame.h"
+
+#include "pforge/compiled_cell.h"
+
+#include "pforge/compiled_function.h"
+
+/* Sentinel PyObject to be used for all our call iterator endings. */
+extern PyObject *Pforge_sentinel_value;
+
+/* Value to use for __compiled__ value of all modules. */
+extern PyObject *Pforge_dunder_compiled_value;
+
+#include "pforge/compiled_generator.h"
+
+#include "pforge/compiled_method.h"
+
+#if PYTHON_VERSION >= 0x350
+#include "pforge/compiled_coroutine.h"
+#endif
+
+#if PYTHON_VERSION >= 0x360
+#include "pforge/compiled_asyncgen.h"
+#endif
+
+#include "pforge/filesystem_paths.h"
+#include "pforge/safe_string_ops.h"
+
+#include "pforge/jit_sources.h"
+
+#if !_PFORGE_EXPERIMENTAL_WRITEABLE_CONSTANTS
+#define DECODE(x) assert(x)
+#define UN_TRANSLATE(x) (x)
+#endif
+
+#if _PFORGE_EXPERIMENTAL_FILE_TRACING
+#include "pforge_file_tracer.h"
+#else
+#if PYTHON_VERSION < 0x300
+#define TRACE_FILE_OPEN(tstate, x, y, z, r) (false)
+#else
+#define TRACE_FILE_OPEN(tstate, x, y, z, a, b, c, d, e, r) (false)
+#endif
+#define TRACE_FILE_READ(tstate, x, y) (false)
+
+#define TRACE_FILE_EXISTS(tstate, x, y) (false)
+#define TRACE_FILE_ISFILE(tstate, x, y) (false)
+#define TRACE_FILE_ISDIR(tstate, x, y) (false)
+
+#define TRACE_FILE_LISTDIR(tstate, x, y) (false)
+
+#define TRACE_FILE_STAT(tstate, x, y, z, r) (false)
+
+#endif
+
+// Only Python3.9+ has a more precise check, while making the old one slow.
+#ifndef PyCFunction_CheckExact
+#define PyCFunction_CheckExact PyCFunction_Check
+#endif
+
+#ifdef _PFORGE_EXPERIMENTAL_DUMP_C_TRACEBACKS
+extern void INIT_C_BACKTRACES(void);
+extern void DUMP_C_BACKTRACE(void);
+
+// For signal handlers, we can do this.
+#if defined(__APPLE__)
+#include <sys/ucontext.h>
+#else
+#include <ucontext.h>
+#endif
+extern void DUMP_C_BACKTRACE_FROM_CONTEXT(void *ucontext);
+#endif
+
+#if _PFORGE_EXPERIMENTAL_EXTRA_INCLUDES
+#include "extra_python_includes.h"
+#endif
+
+#if PYTHON_VERSION >= 0x3f0
+#define FRAME_COMPLETED FRAME_CLEARED
+#endif
+
+#endif
+
+//     Part of "Pforge", an optimizing Python compiler that is compatible and
+//     integrates with CPython, but also works on its own.
+//
+//     Licensed under the GNU Affero General Public License, Version 3 (the "License");
+//     you may not use this file except in compliance with the License.
+//     You may obtain a copy of the License at
+//
+//        https://www.gnu.org/licenses/agpl-3.0.txt
+//
+//     See also: "Pforge Runtime Library Exception, Version 1.0" in file
+//     "LICENSE-RUNTIME.txt" for additional permissions granted under Section 7.
+//
+//     Unless required by applicable law or agreed to in writing, software
+//     distributed under the License is distributed on an "AS IS" BASIS,
+//     WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+//     See the License for the specific language governing permissions and
+//     limitations under the License.

@@ -1,0 +1,359 @@
+#!/usr/bin/env python
+#     Copyright 2026, Kay Hayen, mailto:kay.hayen@gmail.com find license text at end of file
+
+
+"""Main program for PyLint checker tool."""
+
+import os
+import time
+
+from pforge.options.CommandLineOptionsTools import makeOptionsParser
+from pforge.PythonVersions import python_version
+from pforge.tools.Basics import addPYTHONPATH, getHomePath, setupPATH
+from pforge.tools.quality.Git import addGitArguments, getGitPaths
+from pforge.tools.quality.pylint.PyLint import executePyLint
+from pforge.tools.quality.ScanSources import isPythonFile, scanTargets
+from pforge.tools.testing.Common import hasModule, setup
+from pforge.Tracing import my_print, tools_logger
+from pforge.utils.Download import getDownloadMode
+from pforge.utils.FileOperations import (
+    getFileModificationTime,
+    getPathWithForwardSlashes,
+    resolveShellPatternToFilenames,
+)
+from pforge.utils.PrivatePipSpace import (
+    arePackagesInstalledGlobally,
+    getRequiredVersion,
+    tryDownloadPackageName,
+)
+
+
+def _getPathParts(filename):
+    filename = os.path.normpath(filename)
+
+    if not os.path.isabs(filename):
+        filename = os.path.abspath(filename)
+
+    try:
+        filename = os.path.relpath(filename, getHomePath())
+    except ValueError:
+        pass
+
+    return getPathWithForwardSlashes(filename).split("/")
+
+
+def isIgnoredFile(filename):
+    path_parts = _getPathParts(filename)
+
+    if path_parts[0].startswith("Mini"):
+        return True
+    if path_parts[0] == "examples":
+        return True
+    if path_parts[0] == "tests" and path_parts[-1] != "run_all.py":
+        return True
+    if "inline_copy" in path_parts:
+        return True
+
+    return False
+
+
+def _resolveFilenames(options, positional_args):
+    positional_args = getGitPaths(
+        options=options,
+        positional_args=positional_args,
+        default_positional_args=(
+            "bin",
+            "pforge",
+            "setup.py",
+            "tests/*/run_all.py",
+        ),
+    )
+
+    if options.verbose:
+        my_print("Working on: %s" % " ".join(positional_args))
+
+    positional_args = sum(
+        (
+            resolveShellPatternToFilenames(positional_arg)
+            for positional_arg in positional_args
+        ),
+        [],
+    )
+
+    ignore_list = []
+
+    # Avoid checking the Python2 runner along with the one for Python3, it has name collisions.
+    if python_version >= 0x300:
+        ignore_list.append("pforge")
+
+    filenames = list(
+        scanTargets(
+            positional_args, suffixes=(".py", ".scons"), ignore_list=ignore_list
+        )
+    )
+
+    # TODO: Filter this during scanTargets and during getGitPaths already
+    filenames = [
+        filename
+        for filename in filenames
+        if isPythonFile(filename)
+        if not isIgnoredFile(filename)
+    ]
+
+    return filenames
+
+
+def _parseArguments():
+    parser = makeOptionsParser(usage=None, epilog=None)
+
+    addGitArguments(parser)
+
+    parser.add_option(
+        "--show-todo",
+        "--todo",
+        action="store_true",
+        dest="todo",
+        default=False,
+        help="""\
+Show TODO items. Default is %default.""",
+    )
+
+    parser.add_option(
+        "--verbose",
+        action="store_true",
+        dest="verbose",
+        default=False,
+        help="""\
+Be verbose in output. Default is %default.""",
+    )
+
+    parser.add_option(
+        "--one-by-one",
+        action="store_true",
+        dest="one_by_one",
+        default=False,
+        help="""\
+Check files one by one. Default is %default.""",
+    )
+
+    parser.add_option(
+        "--not-installed-is-no-error",
+        action="store_true",
+        dest="not_installed_is_no_error",
+        default=False,
+        help="""\
+Insist on PyLint to be installed. Default is %default.""",
+    )
+
+    parser.add_option(
+        "--watch",
+        action="store_true",
+        dest="watch",
+        default=False,
+        help="""\
+Watch files for changes. Default is %default.""",
+    )
+
+    parser.add_option(
+        "--assume-yes-for-downloads",
+        action="store_true",
+        dest="assume_yes_for_downloads",
+        default=False,
+        help="""\
+Allow download and execution of tools if needed. Default is %default.""",
+    )
+
+    options, positional_args = parser.parse_args()
+
+    return options, positional_args
+
+
+def _watchPylint(options, positional_args):
+    prev_filenames = set()
+    prev_modification_times = {}
+
+    while True:
+        try:
+            filenames = _resolveFilenames(
+                options=options, positional_args=positional_args
+            )
+
+            # Check for changes
+            new_filenames = set(filenames)
+            new_modification_times = {}
+
+            for filename in filenames:
+                try:
+                    new_modification_times[filename] = getFileModificationTime(filename)
+                except OSError:
+                    new_modification_times[filename] = None
+
+            changed = new_filenames != prev_filenames
+            if not changed:
+                for filename, modification_time in new_modification_times.items():
+                    if (
+                        filename not in prev_modification_times
+                        or prev_modification_times[filename] != modification_time
+                    ):
+                        changed = True
+                        break
+
+            if changed:
+                my_print(">>> Pylint Start")
+                try:
+                    executePyLint(
+                        filenames=filenames,
+                        show_todo=options.todo,
+                        verbose=options.verbose,
+                        one_by_one=options.one_by_one,
+                    )
+                except SystemExit:
+                    pass
+
+                my_print(">>> Pylint End")
+
+                prev_filenames = new_filenames
+                prev_modification_times = new_modification_times
+
+            time.sleep(0.5)
+
+        except KeyboardInterrupt:
+            break
+
+    return tools_logger.sysexit(exit_code=0)
+
+
+def _ensurePylintInstalled(options):
+    """Ensure that PyLint is available for checking source code.
+
+    Notes:
+        A globally installed PyLint and its pinned dependencies of the
+        required versions are used without prompting for downloads, e.g. in
+        the containers that install the requirements. Otherwise, the private
+        pip space is consulted, so that a previously downloaded PyLint is used
+        without asking for permission to download anything. Downloads only
+        happen with '--assume-yes-for-downloads' or when the user confirms the
+        prompt.
+
+    Returns:
+        bool: True if PyLint is available, False if it is missing, but skipping
+        it was requested.
+    """
+    package_version = getRequiredVersion(tools_logger, "pylint")
+
+    dependencies = (
+        (
+            "astroid",
+            "astroid",
+            "PyLint depends on 'astroid' for checking source code.",
+        ),
+    )
+
+    # Use pre-installed if matching.
+    package_versions = [("pylint", package_version)] + [
+        (dep_package_name, getRequiredVersion(tools_logger, dep_package_name))
+        for dep_package_name, _dep_module_name, _dep_reject_message in dependencies
+    ]
+
+    if arePackagesInstalledGlobally(package_versions):
+        return True
+
+    # Try the private pip space next. If the correct version is already
+    # installed there, this returns it without any prompt or download.
+    site_packages_folder, download_mode = tryDownloadPackageName(
+        logger=tools_logger,
+        package_name="pylint",
+        module_name="pylint",
+        package_version=package_version,
+        force_update=False,
+        download_mode=getDownloadMode(options.assume_yes_for_downloads),
+        reject_message=(
+            "PyLint is needed for checking source code."
+            if options.assume_yes_for_downloads
+            else None
+        ),
+    )
+
+    if site_packages_folder is not None:
+        addPYTHONPATH(site_packages_folder)
+
+        # Also ensure the pinned dependencies in the private pip space.
+        for dep_package_name, dep_module_name, dep_reject_message in dependencies:
+            _, download_mode = tryDownloadPackageName(
+                logger=tools_logger,
+                package_name=dep_package_name,
+                module_name=dep_module_name,
+                package_version=getRequiredVersion(tools_logger, dep_package_name),
+                force_update=False,
+                download_mode=download_mode,
+                reject_message=dep_reject_message,
+            )
+
+        return True
+
+    # Private pip space not available, fall back to global.
+    if hasModule("pylint"):
+        return True
+
+    if options.not_installed_is_no_error:
+        tools_logger.warning(
+            "PyLint is not installed for this interpreter version: SKIPPED",
+            style="yellow",
+        )
+
+        return False
+
+    return tools_logger.sysexit(
+        "Error, pylint is not installed for this interpreter '%s' version."
+        % os.environ["PYTHON"]
+    )
+
+
+def main():
+    setup(go_main=False)
+
+    # So PyLint finds pforge package.
+    addPYTHONPATH(getHomePath())
+    setupPATH()
+
+    options, positional_args = _parseArguments()
+
+    if not _ensurePylintInstalled(options):
+        return tools_logger.sysexit(exit_code=0)
+
+    if options.watch:
+        return _watchPylint(options=options, positional_args=positional_args)
+
+    filenames = _resolveFilenames(options=options, positional_args=positional_args)
+
+    if not filenames:
+        tools_logger.info("No matching files found that require PyLint.")
+        return 0
+
+    exit_code = executePyLint(
+        filenames=filenames,
+        show_todo=options.todo,
+        verbose=options.verbose,
+        one_by_one=options.one_by_one,
+    )
+
+    return tools_logger.sysexit(exit_code=exit_code)
+
+
+#     Part of "Pforge", an optimizing Python compiler that is compatible and
+#     integrates with CPython, but also works on its own.
+#
+#     Licensed under the GNU Affero General Public License, Version 3 (the "License");
+#     you may not use this file except in compliance with the License.
+#     You may obtain a copy of the License at
+#
+#        https://www.gnu.org/licenses/agpl-3.0.txt
+#
+#     See also: "Pforge Runtime Library Exception, Version 1.0" in file
+#     "LICENSE-RUNTIME.txt" for additional permissions granted under Section 7.
+#
+#     Unless required by applicable law or agreed to in writing, software
+#     distributed under the License is distributed on an "AS IS" BASIS,
+#     WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+#     See the License for the specific language governing permissions and
+#     limitations under the License.

@@ -1,0 +1,79 @@
+#!/usr/bin/python3
+#     Copyright 2026, Kay Hayen, mailto:kay.hayen@gmail.com find license text at end of file
+
+
+"""Release script for manual usage."""
+
+import os
+import sys
+
+# Unchanged, running from checkout, use the parent directory, the pforge
+# package ought be there.
+sys.path.insert(0, os.path.normpath(os.path.join(os.path.dirname(__file__), "..")))
+
+# isort:start
+
+import shutil
+from optparse import OptionParser
+
+from pforge.tools.release.DebianPackage import checkChangeLog
+from pforge.tools.release.Documentation import checkReleaseDocumentation
+from pforge.tools.release.Release import (
+    checkAtHome,
+    checkBranchName,
+    makePforgeSourceDistribution,
+)
+from pforge.Version import getPforgeVersion
+
+parser = OptionParser()
+
+options, positional_args = parser.parse_args()
+
+assert not positional_args, positional_args
+
+checkAtHome()
+
+pforge_version = getPforgeVersion()
+
+branch_name = checkBranchName()
+
+
+if (
+    branch_name.startswith("release")
+    or branch_name == "main"
+    or branch_name.startswith("hotfix/")
+):
+    if pforge_version.count(".") == 1:
+        assert checkChangeLog("New upstream release.")
+    else:
+        assert checkChangeLog("New upstream hotfix release.")
+
+else:
+    assert checkChangeLog("New upstream pre-release."), branch_name
+
+shutil.rmtree("dist", ignore_errors=True)
+shutil.rmtree("build", ignore_errors=True)
+
+checkReleaseDocumentation()
+
+dist_filename = makePforgeSourceDistribution(sign=True)
+
+print("Finished.")
+
+#     Part of "Pforge", an optimizing Python compiler that is compatible and
+#     integrates with CPython, but also works on its own.
+#
+#     Licensed under the GNU Affero General Public License, Version 3 (the "License");
+#     you may not use this file except in compliance with the License.
+#     You may obtain a copy of the License at
+#
+#        https://www.gnu.org/licenses/agpl-3.0.txt
+#
+#     See also: "Pforge Runtime Library Exception, Version 1.0" in file
+#     "LICENSE-RUNTIME.txt" for additional permissions granted under Section 7.
+#
+#     Unless required by applicable law or agreed to in writing, software
+#     distributed under the License is distributed on an "AS IS" BASIS,
+#     WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+#     See the License for the specific language governing permissions and
+#     limitations under the License.

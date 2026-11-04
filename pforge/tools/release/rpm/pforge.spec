@@ -1,0 +1,309 @@
+%if 0%{?rhel} < 8
+# detect python site-packages path, spell-checker: disable
+%if 0%{?fedora} < 31 && 0%{?suse_version} < 1600
+%global python_sitearch %(%{__python} -c "import sys, distutils.sysconfig; sys.stdout.write(distutils.sysconfig.get_python_lib(0))")
+%endif
+%global pforge_python3_sitelib %{python3_sitelib}
+%endif
+
+%global _python_bytecompile_errors_terminate_build 0
+
+Name:           PROJECT_NAME
+Version:        PROJECT_VERSION
+Release:        5%{?dist}
+Summary:        Python compiler with full language support and CPython compatibility
+Group:          Development/Languages/Python
+License:        AGPL-3.0-or-later
+URL:            https://pforge.net/
+Source0:        https://pforge.net/releases/Pforge-%{version}.tar.gz
+Source1:        pforge-rpmlintrc
+BuildRoot:      %{_tmppath}/%{name}-%{version}-%{release}-root-%(%{__id_u} -n)
+%if 0%{?fedora} < 28 && 0%{?rhel} < 8 && 0%{?suse_version} < 1600
+BuildRequires:  python
+BuildRequires:  python-devel
+BuildRequires:  python-setuptools
+%endif
+%if 0%{?fedora} < 31 && 0%{?rhel} < 8 && 0%{?suse_version} < 1600
+BuildRequires:  python-markupsafe
+%endif
+%if 0%{?fedora} >= 24
+BuildRequires:  python-libs
+BuildRequires:  python-debug
+%endif
+%if 0%{?fedora} >= 24 || 0%{?suse_version} >= 1500
+BuildRequires:  python3
+BuildRequires:  python3-devel
+BuildRequires:  python3-pip
+%endif
+%if 0%{?rhel} == 8
+BuildRequires:  python36
+BuildRequires:  python36-devel
+%endif
+%if 0%{?fedora} >= 24 || 0%{?rhel} == 8
+BuildRequires:  python3-markupsafe
+%endif
+%if 0%{?suse_version} >= 1500
+BuildRequires:  python3-MarkupSafe
+%if 0%{?sle_version} == 0
+BuildRequires:  openSUSE-release
+%else
+BuildRequires:  dummy-release
+%endif
+%endif
+%if 0%{?fedora} >= 27
+BuildRequires:  python3-tools
+%endif
+%if 0%{?fedora} >= 35 || 0%{?suse_version} >= 1500
+BuildRequires:  python3-setuptools
+%endif
+BuildRequires:  gcc
+BuildRequires:  gcc-c++
+BuildRequires:  strace
+BuildRequires:  patchelf
+BuildRequires:  ccache
+BuildRequires:  gdb
+
+%if 0%{?fedora} < 28 && 0%{?rhel} < 8 && 0%{?suse_version} < 1600
+Requires:       python-devel
+%endif
+%if 0%{?fedora} >= 24 || 0%{?suse_version} >= 1500
+Requires:       python3-devel
+%endif
+%if 0%{?rhel} == 8
+Requires:       python36-devel
+%endif
+%if 0%{?fedora} < 31 && 0%{?rhel} < 8 && 0%{?suse_version} < 1600
+Requires:       python-markupsafe
+%endif
+%if 0%{?fedora} >= 24 || 0%{?rhel} == 8
+Requires:       python3-markupsafe
+%endif
+%if 0%{?suse_version} >= 1500
+Requires:       python3-MarkupSafe
+%if 0%{?sle_version} == 0
+Requires:       openSUSE-release
+%else
+Requires:       dummy-release
+%endif
+%endif
+Requires:       gcc-c++
+Requires:       strace
+Requires:       patchelf
+Requires:       ccache
+
+BuildArchitectures: noarch
+
+%description
+Python compiler with full language support and CPython compatibility
+
+This Python compiler achieves full language compatibility and compiles Python
+code into compiled objects that are not second class at all. Instead they can
+be used in the same way as pure Python objects.
+
+%prep
+%setup -q -n Pforge-%{version}
+
+%build
+
+python2=`which python2 2>/dev/null || true`
+if [ "$python2" != "" ]
+then
+    python2_version=`$python2 -c "import sys; print '.'.join(str(s) for s in sys.version_info[0:2])"`
+fi
+python3=`which python3 2>/dev/null || true`
+
+# Always delete Windows-only scons:
+rm -rf pforge/build/inline_copy/lib/scons-4.3.0
+
+# Remove unused scons versions. The selection logic in scons.py picks:
+#   Python 2.6        -> scons-2.3.2
+#   Python 2.7, 3.4-3.6 -> scons-3.1.2
+#   Python 3.7+       -> scons-4.10.1
+
+# scons-2.3.2: keep only for Python 2.6
+if [ "$python2_version" = "2.6" ]
+then
+    # tqdm does not work with Python 2.6:
+    rm -rf pforge/build/inline_copy/tqdm
+else
+    rm -rf pforge/build/inline_copy/lib/scons-2.3.2
+fi
+
+# scons-3.1.2: keep for Python 2.7 or Python 3 < 3.7
+keep_scons_3_1_2=
+if [ "$python2_version" = "2.7" ]
+then
+    keep_scons_3_1_2=yes
+fi
+if [ "$python3" != "" ]
+then
+    python3_major=`$python3 -c "import sys; print(sys.version_info[0])"`
+    python3_minor=`$python3 -c "import sys; print(sys.version_info[1])"`
+    if [ "$python3_major" -lt 3 ] || { [ "$python3_major" -eq 3 ] && [ "$python3_minor" -lt 7 ]; }
+    then
+        keep_scons_3_1_2=yes
+    fi
+fi
+if [ "$keep_scons_3_1_2" != "yes" ]
+then
+    rm -rf pforge/build/inline_copy/lib/scons-3.1.2
+fi
+
+# scons-4.10.1: keep only for Python 3.7+
+if [ "$python3" = "" ] || [ "$python3_major" -lt 3 ] || { [ "$python3_major" -eq 3 ] && [ "$python3_minor" -lt 7 ]; }
+then
+    rm -rf pforge/build/inline_copy/lib/scons-4.10.1
+fi
+
+# These are all Windows only or used only there.
+rm -rf pforge/build/inline_copy/clcache
+rm -rf pforge/build/inline_copy/colorama
+rm -rf pforge/build/inline_copy/pefile
+
+if [ "$python2" != "" ]
+then
+    python2_version=`$python2 -c "import sys; print '.'.join(str(s) for s in sys.version_info[0:2])"`
+    $python2 setup.py build
+fi
+
+if [ "$python3" != "" ]
+then
+    $python3 setup.py build
+fi
+
+%check
+
+export PFORGE_UPDATE_CHECK=never
+
+echo "Environment variables during build:"
+env
+
+echo "OS information during build:"
+if [ -f /etc/os-release ]
+then
+    echo "Contents of /etc/os-release :"
+    cat /etc/os-release
+else
+    echo "No /etc/os-release file found"
+fi
+
+if [ -f /etc/SuSE-release ]
+then
+    echo "Contents of /etc/SuSE-release :"
+    cat /etc/SuSE-release
+else
+    echo "No /etc/SuSE-release file found"
+fi
+
+if [ -f /etc/issue ]
+then
+    echo "Contents of /etc/issue :"
+    cat /etc/issue
+else
+    echo "No /etc/issue file found"
+fi
+
+
+if [ -x "$(command -v lsb_release)" ]
+then
+    lsb_release -a
+else
+    echo "No lsb_release binary found"
+fi
+
+
+python2=`which python2 || true`
+
+if [ "$python2" != "" ]
+then
+    echo "Pforge Version information"
+    $python2 -m pforge.__main__ --version
+    echo "Basic compilation test of empty module:"
+    $python2 -m pforge.__main__ --mode=module --show-scons --run --report=out.xml tests/basics/EmptyModuleTest.py
+    echo "Basic compilation test of empty program:"
+    $python2 -m pforge.__main__ --show-scons --run --report=compilation-report-exe.xml --experimental=debug-report-traceback tests/basics/EmptyModuleTest.py
+
+    $python2 ./tests/run-tests --skip-reflection-test --assume-yes-for-downloads
+else
+    echo "Pforge Version information"
+    python3 -m pforge --version
+    echo "Basic compilation test of empty module:"
+    python3 -m pforge --mode=module --show-scons --run tests/basics/EmptyModuleTest.py
+    echo "Basic compilation test of empty program:"
+    python3 -m pforge --show-scons --run tests/basics/EmptyModuleTest.py
+
+    python3 ./tests/run-tests --skip-reflection-test --assume-yes-for-downloads
+fi
+
+%install
+rm -rf %{buildroot}
+
+python2=`which python2 || true`
+python3=`which python3 || true`
+
+if [ "$python2" != "" ]
+then
+    $python2 setup.py install --skip-build --prefix %{_prefix} --root=%{buildroot}
+fi
+
+if [ "$python3" != "" ]
+then
+    $python3 setup.py install --skip-build --prefix %{_prefix} --root=%{buildroot}
+fi
+
+%clean
+rm -rf %{buildroot}
+
+%files
+%defattr(-,root,root,-)
+%doc README.rst Changelog.rst
+%{_bindir}/compile-python-for-pforge-linux.sh
+%if 0%{?fedora} < 31 && 0%{?rhel} < 8 && 0%{?suse_version} < 1600
+%{_bindir}/pforge2
+%{_bindir}/pforge2-run
+%{python_sitearch}/*
+%endif
+%if 0%{?fedora} >= 24 || 0%{?suse_version} >= 1500
+%{pforge_python3_sitelib}/*
+%{_bindir}/pforge
+%{_bindir}/pforge-run
+%endif
+%if 0%{?rhel} == 8
+/usr/lib/python3.6/site-packages/
+%{_bindir}/pforge
+%{_bindir}/pforge-run
+%endif
+%changelog
+* Thu Nov 23 2023 Kay Hayen <kay.hayen@gmail.com> - 1.9
+- changes to build without OBS, removed man pages they
+  are not really needed anyway and are too difficult to
+  maintain.
+
+* Sat Dec 28 2019 Kay Hayen <kay.hayen@gmail.com> - 0.6.7
+- adapted for Fedora31 and CentOS 8, Python3 enhancements
+- added Python3 for openSUSE 15 or higher too.
+
+* Fri Jun 07 2019 Kay Hayen <kay.hayen@gmail.com> - 0.6.4
+- adapted for Fedora30
+
+* Mon Mar 26 2018 Kay Hayen <kay.hayen@gmail.com> - 0.5.29
+- added Python3 packaging
+
+* Sun Sep 08 2013 Kay Hayen <kay.hayen@gmail.com> - 0.4.6
+- changed description to match what we use for Debian
+
+* Fri Mar 15 2013 Kay Hayen <kay.hayen@gmail.com> - 0.4.2
+- addressed complaints from opensuse buildservice
+- moved to group "/Development/Languages/Python"
+- no trailing dot for description,
+- man pages also for Python3 related binaries
+
+* Sun Mar 10 2013 ownssh <ownssh@gmail.com> - 0.4.1-3
+- use shortcut files to support python3 (remove python3 base package)
+- change requires python to python-devel
+
+* Thu Mar 07 2013 ownssh <ownssh@gmail.com> - 0.4.1-2
+- Add python3 support
+
+* Thu Mar 07 2013 ownssh <ownssh@gmail.com> - 0.4.1-1
+- Initial packaging of Pforge as RPM.

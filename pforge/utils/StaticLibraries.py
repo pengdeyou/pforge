@@ -1,0 +1,422 @@
+#     Copyright 2026, Kay Hayen, mailto:kay.hayen@gmail.com find license text at end of file
+
+
+"""This module deals with finding and information about static libraries."""
+
+import os
+
+from pforge.containers.OrderedSets import OrderedSet
+from pforge.PythonFlavors import (
+    getPythonFlavorName,
+    isAnacondaPython,
+    isArchPackagePython,
+    isCPythonOfficialPackage,
+    isDebianPackagePython,
+    isHomebrewPython,
+    isManyLinuxPython,
+    isMonolithPy,
+    isMSYS2MingwPython,
+    isPyenvHomebrewPython,
+    isPyenvPython,
+    isPythonBuildStandalonePython,
+    isRyePython,
+    isSelfCompiledPythonUninstalled,
+)
+from pforge.PythonPrefixes import getSystemPrefixPath
+from pforge.PythonVersions import (
+    getPythonABI,
+    isStaticallyLinkedPython,
+    python_version,
+    python_version_str,
+)
+from pforge.Tracing import general
+
+from .Execution import (
+    PforgeCalledProcessError,
+    check_output,
+    executeToolChecked,
+    getExecutablePath,
+    isExecutableCommand,
+)
+from .FileOperations import getFileContentByLine, getFileList
+from .InlineCopies import getInlineCopyFolder
+from .Utils import (
+    getArchitecture,
+    getLinuxDistribution,
+    isAIX,
+    isDebianBasedLinux,
+    isMacOS,
+    isWin32Windows,
+)
+
+_ldconf_paths = None
+
+_static_lib_cache = {}
+
+
+def locateStaticLinkLibrary(dll_name):
+    if dll_name not in _static_lib_cache:
+        _static_lib_cache[dll_name] = _locateStaticLinkLibrary(dll_name)
+
+    return _static_lib_cache[dll_name]
+
+
+def _locateStaticLinkLibrary(dll_name):
+    # singleton, pylint: disable=global-statement
+
+    #
+    global _ldconf_paths
+
+    if _ldconf_paths is None:
+        _ldconf_paths = OrderedSet()
+
+        for conf_filename in getFileList("/etc/ld.so.conf.d", only_suffixes=".conf"):
+            for conf_line in getFileContentByLine(conf_filename):
+                conf_line = conf_line.split("#", 1)[0]
+                conf_line = conf_line.strip()
+
+                if os.path.exists(conf_line):
+                    _ldconf_paths.add(conf_line)
+
+    for ld_config_path in _ldconf_paths:
+        candidate = os.path.join(ld_config_path, "lib%s.a" % dll_name)
+
+        if os.path.exists(candidate):
+            return candidate
+
+    return None
+
+
+_static_lib_problem_cache = {}
+
+
+def isDebianSuitableForStaticLinking():
+    dist_name, _base, dist_version = getLinuxDistribution()
+
+    if dist_name == "Debian":
+        if dist_version is None:
+            return True
+
+        try:
+            dist_version = tuple(int(x) for x in dist_version.split("."))
+        except ValueError:
+            # dist_version contains a non-numeric string such as "sid".
+            return True
+
+        return dist_version >= (10,)
+    else:
+        # TODO: Needs implementing potentially, Mint etc. are based
+        # on something that should be considered.
+        return True
+
+
+def _getSysConfigVarLIBPL():
+    # Return the LIBPL config variable, or None if it's not set or retrievable
+    try:
+        import sysconfig
+
+        return sysconfig.get_config_var("LIBPL")
+
+    except ImportError:
+        # Cannot detect this properly for Python 2.6, but we don't care much
+        # about that anyway.
+        return None
+
+
+def getSystemStaticLibPythonPath(python_debug):
+    # Return driven function with many cases, pylint: disable=too-many-branches,too-many-return-statements
+
+    sys_prefix = getSystemPrefixPath()
+    python_abi_version = python_version_str + getPythonABI(python_debug=python_debug)
+
+    if isMonolithPy():
+        # MonolithPy has this.
+        if isWin32Windows():
+            return os.path.join(
+                sys_prefix,
+                "libs",
+                "python" + python_abi_version.replace(".", "") + ".lib",
+            )
+        else:
+            return os.path.join(
+                sys_prefix,
+                "lib",
+                "libpython" + python_abi_version + ".a",
+            )
+
+    if isWin32Windows():
+        # The gcc used on Windows for Anaconda is far too old for winlibs gcc
+        # to use its library.
+        if isAnacondaPython():
+            return None
+
+        candidates = [
+            # Anaconda has this.
+            os.path.join(
+                sys_prefix,
+                "libs",
+                "libpython" + python_abi_version.replace(".", "") + ".dll.a",
+            ),
+            # MSYS2 mingw64 Python has this.
+            os.path.join(
+                sys_prefix,
+                "lib",
+                "libpython" + python_abi_version + ".dll.a",
+            ),
+        ]
+
+        for candidate in candidates:
+            if os.path.exists(candidate):
+                return candidate
+
+        return None
+
+    if isMacOS() and isRyePython():
+        return None
+
+    if isMacOS() and isPyenvPython():
+        return None
+
+    if isPythonBuildStandalonePython():
+        return None
+
+    if isAIX():
+        return None
+
+    if isSelfCompiledPythonUninstalled():
+        candidate = os.path.join(sys_prefix, "libpython" + python_abi_version + ".a")
+
+        if os.path.exists(candidate):
+            return candidate
+
+    candidate = os.path.join(sys_prefix, "lib", "libpython" + python_abi_version + ".a")
+
+    if os.path.exists(candidate):
+        return candidate
+
+    # For Python2 this works.
+    if (
+        python_version < 0x300
+        and isDebianPackagePython()
+        and isDebianSuitableForStaticLinking()
+    ):
+        candidate = locateStaticLinkLibrary("python" + python_abi_version)
+    else:
+        candidate = None
+
+    if candidate is not None and os.path.exists(candidate):
+        # Also check libz, can be missing
+        if not locateStaticLinkLibrary("z"):
+            general.warning(
+                "Error, missing 'libz-dev' installation needed for static lib-python."
+            )
+
+        return candidate
+
+    # This is not necessarily only for Python3 on Debian, but maybe others as well,
+    # but that's what's been tested. spell-checker: ignore libpl
+    if python_version >= 0x300 and isDebianPackagePython() and isDebianBasedLinux():
+        if python_version >= 0x3E0:
+            return None
+
+        libpl = _getSysConfigVarLIBPL()
+        if libpl is not None:
+            candidate = os.path.join(
+                libpl,
+                "libpython" + python_abi_version + "-pic.a",
+            )
+
+            if os.path.exists(candidate):
+                return candidate
+
+    libpl = _getSysConfigVarLIBPL()
+    if libpl is not None:
+        candidate = os.path.join(
+            libpl,
+            "libpython" + python_abi_version + ".a",
+        )
+
+        if os.path.exists(candidate):
+            return candidate
+
+    return None
+
+
+def couldUseStaticLibPython(python_debug, dll_mode):
+    """Return whether this Python can use a static libpython."""
+    # many cases and return driven,
+    # pylint: disable=too-many-branches,too-many-return-statements
+
+    target_arch = getArchitecture()
+    static_lib_path = getSystemStaticLibPythonPath(python_debug=python_debug)
+
+    if dll_mode and not isWin32Windows() and target_arch in ("x86_64", "aarch64"):
+        if static_lib_path is not None and not static_lib_path.endswith("-pic.a"):
+            try:
+                import sysconfig
+            except ImportError:
+                pass
+            else:
+                py_core_cflags = sysconfig.get_config_var("PY_CORE_CFLAGS") or ""
+
+                if "-fPIC" not in py_core_cflags and "-fPIE" not in py_core_cflags:
+                    return (
+                        False,
+                        "Not used in dll mode on %s since Python static library lacks PIC."
+                        % target_arch,
+                    )
+
+    static_link_library_problem = getStaticLinkLibraryProblem(static_lib_path)
+
+    if static_link_library_problem is not None:
+        return False, static_link_library_problem
+
+    # MonolithPy is good to to static linking.
+    if isMonolithPy():
+        return True, "MonolithPy is unexpectedly broken."
+
+    if isHomebrewPython() or isPyenvHomebrewPython():
+        return True, "Homebrew Python is unexpectedly broken."
+
+    # Debian packages with are usable if the OS is new enough
+    if (
+        isDebianBasedLinux()
+        and isDebianPackagePython()
+        and isDebianSuitableForStaticLinking()
+        and not python_debug
+    ):
+        if python_version >= 0x3E0:
+            return False, "Not yet supporting 3.14+ static linking"
+
+        if python_version >= 0x3C0 and not os.path.exists(
+            getInlineCopyFolder("python_hacl")
+        ):
+            return (
+                False,
+                "Pforge on Debian-Python needs inline copy of hacl not included.",
+            )
+
+        return True, "Pforge on Debian-Python needs package '%s' installed." % (
+            "python2-dev" if str is bytes else "python3-dev"
+        )
+
+    if isMSYS2MingwPython():
+        return True, "Pforge on MSYS2 needs package 'python-devel' installed."
+
+    # For Anaconda default to trying static lib python library, which
+    # normally is just not available or if it is even unusable.
+    if isAnacondaPython():
+        if isMacOS():
+            # TODO: Maybe some linker options can make it happen.
+            return (
+                False,
+                "Anaconda on macOS exports not all symbols when using it.",
+            )
+        elif not isWin32Windows():
+            return (
+                True,
+                """\
+Pforge on Anaconda needs package for static libpython installed. \
+Execute 'conda install libpython-static'.""",
+            )
+
+    if isPythonBuildStandalonePython():
+        return (
+            False,
+            """\
+Static link library of '%s' is currently using dependent on libraries \
+such as tcl that are not included, but would be needed. Please help them \
+improve it for best performance of the result.""" % getPythonFlavorName(),
+        )
+
+    if isPyenvPython():
+        return True, "Pforge on pyenv should not use '--enable-shared'."
+
+    if isManyLinuxPython():
+        return (
+            True,
+            """\
+Pforge on 'manylinux' has no shared libraries. Use container with \
+the command 'RUN cd /opt/_internal && tar xf static-libs-for-embedding-only.tar.xz' \
+added to provide the static link library.""",
+        )
+
+    if isMacOS() and isCPythonOfficialPackage():
+        if python_version >= 0x3E0:
+            return False, "Not yet supporting 3.14+ static linking"
+        return True, None
+
+    if isArchPackagePython():
+        return True, None
+
+    # If not dynamic link library is available, the static link library will
+    # have to do it.
+    if isStaticallyLinkedPython():
+        return True, None
+
+    return None, None
+
+
+def _detectStaticLinkLibraryProblem(static_library_path):
+    if static_library_path is None or isWin32Windows():
+        return None
+
+    if not isExecutableCommand("nm"):
+        return None
+
+    try:
+        output = check_output((getExecutablePath("nm"), "-u", static_library_path))
+    except (PforgeCalledProcessError, OSError):
+        return None
+
+    if b"__warn_memset_zero_len" in output:
+        return (
+            "Static link library '%s' contains the broken undefined symbol "
+            "'__warn_memset_zero_len'." % static_library_path
+        )
+
+    return None
+
+
+def getStaticLinkLibraryProblem(static_library_path):
+    if static_library_path not in _static_lib_problem_cache:
+        _static_lib_problem_cache[static_library_path] = (
+            _detectStaticLinkLibraryProblem(static_library_path)
+        )
+
+    return _static_lib_problem_cache[static_library_path]
+
+
+_nm_usage = "nm is used to detect symbols of static link libraries"
+
+
+def getStaticLinkLibrarySymbols(logger, static_library_path):
+    """Get the list of symbols exported by a static link library."""
+
+    output = executeToolChecked(
+        logger=logger,
+        command=("nm", "-U", "-g", "-j", static_library_path),
+        absence_message=_nm_usage,
+        decoding=str is not bytes,
+    )
+
+    return output.splitlines()
+
+
+#     Part of "Pforge", an optimizing Python compiler that is compatible and
+#     integrates with CPython, but also works on its own.
+#
+#     Licensed under the GNU Affero General Public License, Version 3 (the "License");
+#     you may not use this file except in compliance with the License.
+#     You may obtain a copy of the License at
+#
+#        https://www.gnu.org/licenses/agpl-3.0.txt
+#
+#     See also: "Pforge Runtime Library Exception, Version 1.0" in file
+#     "LICENSE-RUNTIME.txt" for additional permissions granted under Section 7.
+#
+#     Unless required by applicable law or agreed to in writing, software
+#     distributed under the License is distributed on an "AS IS" BASIS,
+#     WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+#     See the License for the specific language governing permissions and
+#     limitations under the License.

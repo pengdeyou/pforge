@@ -1,0 +1,100 @@
+# yamllint disable rule:line-length
+# yamllint disable rule:indentation
+# yamllint disable rule:comments-indentation
+# yamllint disable rule:comments
+# too many spelling things, spell-checker: disable
+---
+- module-name: '_asyncio' # checksum: 86bf476b
+  implicit-imports:
+    - depends:
+        - 'asyncio'
+
+- module-name: '_sitebuiltins' # checksum: f8cccd39
+  anti-bloat:
+    - no-auto-follow:
+        'pydoc': 'ignore'
+
+- module-name: '_zoneinfo' # checksum: 8de2a2bd
+  implicit-imports:
+    - depends:
+        - 'zoneinfo._common'
+
+- module-name: 'enum' # checksum: a9e2240c
+  anti-bloat:
+    - replacements_plain:
+        'def __call__(cls, value,': 'def __call__(cls, value=None,'
+        'return cls.__new__(cls, value)': 'return cls.__new__(cls, value if value is not None or cls.__module__ != "PySide6.QtCore" else 0)'
+      when: 'plugin("pyside6")'
+
+- module-name: 'importlib.metadata' # checksum: 8a2592fb
+  implicit-imports:
+    - depends:
+        - 'csv'
+
+- module-name: 'multiprocessing.context' # checksum: 96475306
+  anti-bloat:
+    - description: "workaround for 'sys.frozen' not being set"
+      replacements_plain:
+        "getattr(sys, 'frozen', False)": 'True'
+
+- module-name: 'multiprocessing.popen_spawn_win32' # checksum: 96475306
+  anti-bloat:
+    - description: "workaround for 'sys.frozen' not being set"
+      replacements_plain:
+        "getattr(sys, 'frozen', False)": 'True'
+
+- module-name: 'multiprocessing.resource_tracker' # checksum: e8bba98a
+  anti-bloat:
+    - description: "workaround for starting 'multiprocessing resource tracker"
+      replacements_plain:
+        "args += ['-c', cmd % r]": "args += ['--multiprocessing-resource-tracker', str(r)]"
+      when: 'not module_mode'
+
+- module-name: 'multiprocessing.spawn' # checksum: 96475306
+  anti-bloat:
+    - description: "workaround for 'sys.frozen' not being set"
+      replacements_plain:
+        "getattr(sys, 'frozen', False)": 'True'
+
+- module-name: 'tkinter' # checksum: 481f7b98
+  anti-bloat:
+    - description: 'enhanced tk-inter in case of missing tcl'
+      context:
+        - 'import textwrap'
+      replacements:
+        'self.tk = _tkinter.create(screenName, baseName, className, interactive, wantobjects, useTk, sync, use)': |
+          textwrap.indent("""
+          try:
+            self.tk = _tkinter.create(screenName, baseName, className, interactive, wantobjects, useTk, sync, use)
+          except _tkinter.TclError as e:
+            if "usable init.tcl" not in str(e):
+              raise\n\
+            sys.exit("Pforge: Need to use '--enable-plugin=tk-inter' option during compilation for tk-inter to work!")
+          """, "        ")
+      when: 'not deployment and not plugin("tk-inter")'
+  options:
+    checks:
+      - macos_bundle: 'recommend'
+        when: 'plugin("tk-inter")'
+
+- module-name: 'xmlrpc.server' # checksum: 57da2566
+  anti-bloat:
+    - description: 'avoid using pydoc'
+      replacements_plain:
+        'import pydoc': ''
+      change_class:
+        'ServerHTMLDoc': 'un-usable'
+      when: 'not use_pydoc'
+
+- module-name: 'zipapp' # checksum: 6a44b57d
+  anti-bloat:
+    - description: 'remove module ability to run as a binary'
+      change_function:
+        'main': "'(lambda: None)'"
+
+- module-name: 'zoneinfo' # checksum: 149e81f3
+  # This tries to find non-stdlib module when being used.
+  implicit-imports:
+    - depends:
+        - 'tzdata.zoneinfo'
+      when: 'win32'

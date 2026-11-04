@@ -1,0 +1,67 @@
+#     Copyright 2026, Kay Hayen, mailto:kay.hayen@gmail.com find license text at end of file
+
+[build-system]
+requires = ["setuptools>=42", "wheel"]
+
+[tool.pyright]
+typeCheckingMode = "basic"
+pythonVersion = "3.12"
+
+reportAttributeAccessIssue = "none"
+reportMissingModuleSource = "none"
+reportMissingImports = "none"
+
+reportOptionalMemberAccess = "none"
+reportOptionalCall = "none"
+reportOptionalSubscript = "none"
+reportOptionalIterable = "none"
+reportOptionalOperand = "none"
+
+reportArgumentType = "none"
+reportAssignmentType = "none"
+reportCallIssue = "none"
+reportOperatorIssue = "none"
+reportGeneralTypeIssues = "none"
+
+reportRedeclaration = "none"
+reportPrivateImportUsage = "none"
+
+exclude = [
+    "**/node_modules",
+    "**/__pycache__",
+    "**/.*",
+    "**/inline_copy/**",
+    "tests/CPython*",
+    "*Mini*",
+]
+
+[tool.ruff]
+builtins = ["__compiled__", "cmp", "intern", "unicode", "long"]
+lint.ignore = ["BLE001", "C402", "C405", "E402", "E731", "F401", "F632", "I001", "N999", "PLR1711", "RET501", "S110", "SIM103", "SIM117", "UP004", "UP010", "UP020", "UP024", "UP028", "UP031", "UP036", "RUF023"]
+force-exclude = true
+exclude = [
+    "**/node_modules",
+    "**/__pycache__",
+    "**/.*",
+    "**/inline_copy/**",
+    "tests",
+    "*Mini*",
+]
+
+#     Part of "Pforge", an optimizing Python compiler that is compatible and
+#     integrates with CPython, but also works on its own.
+#
+#     Licensed under the GNU Affero General Public License, Version 3 (the "License");
+#     you may not use this file except in compliance with the License.
+#     You may obtain a copy of the License at
+#
+#        https://www.gnu.org/licenses/agpl-3.0.txt
+#
+#     See also: "Pforge Runtime Library Exception, Version 1.0" in file
+#     "LICENSE-RUNTIME.txt" for additional permissions granted under Section 7.
+#
+#     Unless required by applicable law or agreed to in writing, software
+#     distributed under the License is distributed on an "AS IS" BASIS,
+#     WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+#     See the License for the specific language governing permissions and
+#     limitations under the License.

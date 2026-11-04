@@ -1,0 +1,834 @@
+//     Copyright 2026, Kay Hayen, mailto:kay.hayen@gmail.com find license text at end of file
+
+/* These slots are still manually coded and are used by the generated code.
+ *
+ * The plan should be to generate these as well, so e.g. we can have a slot
+ * SLOT_nb_add_LONG_INT that is optimal too.
+ */
+
+#include "pforge/helper/long_helpers.h"
+
+// This file is included from another C file, help IDEs to still parse it on
+// its own.
+#ifdef __IDE_ONLY__
+#include "pforge/prelude.h"
+#endif
+
+// Our version of _PyLong_New(size);
+static PyLongObject *Pforge_LongNew(Py_ssize_t size) {
+    // TODO: The assertion may be a bit to strong, could be <= for at least < 3.12
+    assert(size < (Py_ssize_t)MAX_LONG_DIGITS);
+    assert(size >= 0);
+
+#if PYTHON_VERSION >= 0x3c0
+    // The zero now is a single digit number.
+    Py_ssize_t ndigits = size ? size : 1;
+
+    PyLongObject *result =
+        (PyLongObject *)PforgeObject_Malloc(offsetof(PyLongObject, long_value.ob_digit) + ndigits * sizeof(digit));
+
+    _PyObject_Init((PyObject *)result, &PyLong_Type);
+
+#if PYTHON_VERSION >= 0x3f0
+    // Python 3.15 initializes the tag before setting sign and digit count,
+    // since "_PyLong_SetSignAndDigitCount" asserts the value is not a small
+    // int and reads the tag field via "_PyLong_IsSmallInt".
+    _PyLong_InitTag(result);
+#endif
+
+    _PyLong_SetSignAndDigitCount(result, size != 0, size);
+    result->long_value.ob_digit[0] = 0;
+    return result;
+#else
+    PyLongObject *result = (PyLongObject *)PforgeObject_Malloc(offsetof(PyLongObject, ob_digit) + size * sizeof(digit));
+
+    Py_SET_SIZE((PyVarObject *)result, size);
+    Py_SET_TYPE(result, &PyLong_Type);
+    Pforge_Py_NewReference((PyObject *)result);
+
+    return result;
+#endif
+}
+
+static PyObject *Pforge_LongRealloc(PyObject *value, Py_ssize_t size) {
+    assert(size >= 0);
+
+    PyLongObject *result = Pforge_LongNew(size);
+    Pforge_LongSetDigitSizeAndNegative(result, size, false);
+    Py_DECREF(value);
+
+    return (PyObject *)result;
+}
+
+static PyObject *Pforge_LongFromCLong(long ival) {
+#if PYTHON_VERSION < 0x300
+    if (ival == 0) {
+        PyLongObject *result = Pforge_LongNew(0);
+
+        return (PyObject *)result;
+    }
+#else
+    if (ival >= PFORGE_STATIC_SMALLINT_VALUE_MIN && ival < PFORGE_STATIC_SMALLINT_VALUE_MAX) {
+        PyObject *result = Pforge_Long_GetSmallValue(ival);
+        Py_INCREF(result);
+
+        return result;
+    }
+#endif
+
+    // We go via unsigned long to avoid overflows when shifting and we need
+    // the sign separate in the end anyway.
+    unsigned long abs_ival;
+    bool negative;
+
+    if (ival < 0) {
+        abs_ival = 0U - (unsigned long)ival;
+        negative = true;
+    } else {
+        abs_ival = (unsigned long)ival;
+        negative = false;
+    }
+
+    // Fast path for single digit values
+    if (!(abs_ival >> PyLong_SHIFT)) {
+        PyLongObject *result = Pforge_LongNew(1);
+        assert(result != NULL);
+        if (negative) {
+            Pforge_LongSetSignNegative(result);
+        }
+
+        digit *digits = Pforge_LongGetDigitPointer(result);
+        digits[0] = (digit)abs_ival;
+
+        return (PyObject *)result;
+    }
+
+    // Fast path for two digit values on suitable platforms.
+#if PyLong_SHIFT == 15
+    if (!(abs_ival >> 2 * PyLong_SHIFT)) {
+        PyLongObject *result = Pforge_LongNew(2);
+        assert(result != NULL);
+        if (negative) {
+            Pforge_LongSetSignNegative(result);
+        }
+
+        digit *digits = Pforge_LongGetDigitPointer(result);
+
+        digits[0] = (digit)(abs_ival & PyLong_MASK);
+        digits[1] = (digit)(abs_ival >> PyLong_SHIFT);
+
+        return (PyObject *)result;
+    }
+#endif
+
+    // Slow path for the rest.
+    unsigned long t = abs_ival;
+    Py_ssize_t ndigits = 0;
+
+    // First determine the number of digits needed.
+    while (t != 0) {
+        ++ndigits;
+        t >>= PyLong_SHIFT;
+    }
+
+    PyLongObject *result = _PyLong_New(ndigits);
+    assert(result != NULL);
+
+    Pforge_LongSetDigitSizeAndNegative(result, ndigits, negative);
+
+    digit *d = Pforge_LongGetDigitPointer(result);
+
+    // Now copy the digits
+    t = abs_ival;
+    while (t != 0) {
+        *d++ = (digit)(t & PyLong_MASK);
+        t >>= PyLong_SHIFT;
+    }
+
+    return (PyObject *)result;
+}
+
+// Our "PyLong_FromLong" replacement.
+PyObject *Pforge_PyLong_FromLong(long ival) { return Pforge_LongFromCLong(ival); }
+
+// Our "PyLong_AsLongAndOverflow" replacement with a fast path for exact long values.
+long Pforge_PyLong_AsLongAndOverflow(PyObject *value, int *overflow) {
+    CHECK_OBJECT(value);
+    assert(overflow != NULL);
+
+    *overflow = 0;
+
+    if (value == Py_False) {
+        return 0;
+    }
+
+    if (value == Py_True) {
+        return 1;
+    }
+
+#if PYTHON_VERSION < 0x300
+    if (PyInt_CheckExact(value)) {
+        return PyInt_AS_LONG(value);
+    }
+#endif
+
+    if (PyLong_CheckExact(value)) {
+        Py_ssize_t digit_count = Pforge_LongGetDigitSize(value);
+
+        if (digit_count == 0) {
+            return 0;
+        }
+
+        if (digit_count == 1) {
+            return (long)MEDIUM_VALUE(value);
+        }
+
+        digit const *digits = Pforge_LongGetDigitPointer(value);
+        unsigned long result = 0;
+        bool negative = Pforge_LongIsNegative(value);
+
+        for (Py_ssize_t i = digit_count; i > 0; i--) {
+            if (result > (ULONG_MAX >> PyLong_SHIFT)) {
+                *overflow = negative ? -1 : 1;
+                return -1;
+            }
+
+            result <<= PyLong_SHIFT;
+
+            if (result > ULONG_MAX - digits[i - 1]) {
+                *overflow = negative ? -1 : 1;
+                return -1;
+            }
+
+            result += digits[i - 1];
+        }
+
+        if (negative) {
+            unsigned long const negative_limit = (unsigned long)LONG_MAX + 1UL;
+
+            if (result > negative_limit) {
+                *overflow = -1;
+                return -1;
+            }
+
+            if (result == negative_limit) {
+                return LONG_MIN;
+            }
+
+            return -(long)result;
+        }
+
+        if (result > (unsigned long)LONG_MAX) {
+            *overflow = 1;
+            return -1;
+        }
+
+        return (long)result;
+    }
+
+#if PYTHON_VERSION >= 0x270
+    return PyLong_AsLongAndOverflow(value, overflow);
+#else
+    // TODO: Python 2.6 doesn't have the overflow-reporting API, but we will add
+    // our own PyLong_AsLongAndOverflow anyway.
+    return PyLong_AsLong(value);
+#endif
+}
+
+// Our "PyLong_AsSsize_t" replacement with a fast path for long values.
+Py_ssize_t Pforge_PyLong_AsSsize_tAndOverflow(PyObject *value, int *overflow) {
+    CHECK_OBJECT(value);
+    assert(overflow != NULL);
+    assert(PyLong_Check(value));
+
+    *overflow = 0;
+
+    if (value == Py_False) {
+        return 0;
+    }
+
+    if (value == Py_True) {
+        return 1;
+    }
+
+    Py_ssize_t digit_count = Pforge_LongGetDigitSize(value);
+
+    if (digit_count == 0) {
+        return 0;
+    }
+
+    if (digit_count == 1) {
+        return (Py_ssize_t)MEDIUM_VALUE(value);
+    }
+
+    digit const *digits = Pforge_LongGetDigitPointer(value);
+    size_t result = 0;
+    bool negative = Pforge_LongIsNegative(value);
+
+    for (Py_ssize_t i = digit_count; i > 0; i--) {
+        size_t previous = result;
+
+        result = (result << PyLong_SHIFT) | digits[i - 1];
+
+        // Overflow detection, exactly like CPython does it.
+        if ((result >> PyLong_SHIFT) != previous) {
+            *overflow = negative ? -1 : 1;
+            return -1;
+        }
+    }
+
+    if (negative) {
+        size_t const negative_limit = (size_t)PY_SSIZE_T_MAX + 1;
+
+        if (result > negative_limit) {
+            *overflow = -1;
+            return -1;
+        }
+
+        if (result == negative_limit) {
+            return PY_SSIZE_T_MIN;
+        }
+
+        return -(Py_ssize_t)result;
+    }
+
+    if (result > (size_t)PY_SSIZE_T_MAX) {
+        *overflow = 1;
+        return -1;
+    }
+
+    return (Py_ssize_t)result;
+}
+
+// Our "PyLong_AsSsize_t" replacement, raising errors for invalid values and
+// overflow.
+Py_ssize_t Pforge_PyLong_AsSsize_t(PyThreadState *tstate, PyObject *value) {
+    CHECK_OBJECT(value);
+
+    if (unlikely(!PyLong_Check(value))) {
+#if PYTHON_VERSION < 0x300
+        SET_CURRENT_EXCEPTION_TYPE0_STR(tstate, PyExc_SystemError, "bad argument to internal function");
+#else
+        SET_CURRENT_EXCEPTION_TYPE0_STR(tstate, PyExc_TypeError, "an integer is required");
+#endif
+
+        return -1;
+    }
+
+    int overflow;
+    Py_ssize_t result = Pforge_PyLong_AsSsize_tAndOverflow(value, &overflow);
+
+    if (unlikely(overflow != 0)) {
+#if PYTHON_VERSION < 0x300
+        SET_CURRENT_EXCEPTION_TYPE0_STR(tstate, PyExc_OverflowError, "long int too large to convert to int");
+#else
+        SET_CURRENT_EXCEPTION_TYPE0_STR(tstate, PyExc_OverflowError, "Python int too large to convert to C ssize_t");
+#endif
+
+        return -1;
+    }
+
+    return result;
+}
+
+static void Pforge_LongUpdateFromCLong(PyObject **value, long ival) {
+    assert(Py_REFCNT(*value) == 1);
+
+#if PYTHON_VERSION < 0x300
+    if (ival == 0) {
+        if (Py_SIZE(*value) == 0) {
+            return;
+        }
+
+        Py_DECREF(*value);
+        *value = (PyObject *)Pforge_LongNew(0);
+
+        return;
+    }
+#else
+    if (ival >= PFORGE_STATIC_SMALLINT_VALUE_MIN && ival < PFORGE_STATIC_SMALLINT_VALUE_MAX) {
+        Py_DECREF(*value);
+
+        *value = Pforge_Long_GetSmallValue(ival);
+        Py_INCREF(*value);
+
+        return;
+    }
+#endif
+
+    // We go via unsigned long to avoid overflows when shifting and we need
+    // the sign separate in the end anyway.
+    unsigned long abs_ival;
+    bool negative;
+
+    if (ival < 0) {
+        abs_ival = 0U - (unsigned long)ival;
+        negative = true;
+    } else {
+        abs_ival = (unsigned long)ival;
+        negative = false;
+    }
+
+    // Fast path for single digit values
+    if (!(abs_ival >> PyLong_SHIFT)) {
+        PyLongObject *result;
+
+#if PYTHON_VERSION < 0x3c0
+        if (unlikely(Py_SIZE(*value) == 0)) {
+            *value = Pforge_LongRealloc(*value, 1);
+            CHECK_OBJECT(*value);
+
+            result = (PyLongObject *)*value;
+        } else
+#endif
+        {
+            result = (PyLongObject *)(*value);
+        }
+
+        Pforge_LongSetSign(result, !negative);
+
+        digit *digits = Pforge_LongGetDigitPointer(result);
+        digits[0] = (digit)abs_ival;
+
+        return;
+    }
+
+    // Fast path for two digit values on suitable platforms, e.g. armv7l
+#if PyLong_SHIFT == 15
+    if (!(abs_ival >> 2 * PyLong_SHIFT)) {
+        PyLongObject *result;
+        if (unlikely(Pforge_LongGetDigitSize(*value) < 2)) {
+            *value = Pforge_LongRealloc(*value, 2);
+            CHECK_OBJECT(*value);
+
+            result = (PyLongObject *)*value;
+        } else {
+            result = (PyLongObject *)(*value);
+        }
+
+        if (negative) {
+            Pforge_LongSetSignNegative(result);
+        }
+
+        digit *digits = Pforge_LongGetDigitPointer(result);
+
+        digits[0] = (digit)(abs_ival & PyLong_MASK);
+        digits[1] = (digit)(abs_ival >> PyLong_SHIFT);
+
+        return;
+    }
+#endif
+
+    // Slow path for the rest.
+    unsigned long t = abs_ival;
+    Py_ssize_t ndigits = 0;
+
+    // First determine the number of digits needed.
+    while (t != 0) {
+        ndigits++;
+        t >>= PyLong_SHIFT;
+    }
+
+    if (unlikely(Pforge_LongGetDigitSize(*value) < ndigits)) {
+        *value = Pforge_LongRealloc(*value, ndigits);
+    }
+
+    CHECK_OBJECT(*value);
+
+    Pforge_LongSetDigitSizeAndNegative((PyLongObject *)*value, ndigits, negative);
+
+    digit *d = Pforge_LongGetDigitPointer(*value);
+
+    // Now copy the digits
+    t = abs_ival;
+    while (t) {
+        *d++ = (digit)(t & PyLong_MASK);
+        t >>= PyLong_SHIFT;
+    }
+
+    return;
+}
+
+#if 0
+// Note: We are manually inlining this so far.
+static PyLongObject *Pforge_LongStripZeros(PyLongObject *v) {
+    Py_ssize_t j = Py_ABS(Py_SIZE(v));
+
+    Py_ssize_t i = j;
+    while (i > 0 && v->ob_digit[i - 1] == 0) {
+        i -= 1;
+    }
+
+    if (i != j) {
+        Py_SIZE(v) = (Py_SIZE(v) < 0) ? -i : i;
+    }
+
+    return v;
+}
+#endif
+
+static PyLongObject *_Pforge_LongAddDigits(digit const *a, Py_ssize_t size_a, digit const *b, Py_ssize_t size_b) {
+    // Make sure we know a is the longest value.
+    if (size_a < size_b) {
+        {
+            digit const *temp = a;
+            a = b;
+            b = temp;
+        }
+
+        {
+            Py_ssize_t temp = size_a;
+            size_a = size_b;
+            size_b = temp;
+        }
+    }
+
+    // We do not know ahead of time, if we need a new digit, lets just allocate it.
+    PyLongObject *result = Pforge_LongNew(size_a + 1);
+    CHECK_OBJECT(result);
+
+    digit *r = Pforge_LongGetDigitPointer(result);
+
+    digit carry = 0;
+
+    // First common digits.
+    Py_ssize_t i;
+    for (i = 0; i < size_b; i++) {
+        carry += a[i] + b[i];
+        r[i] = carry & PyLong_MASK;
+        carry >>= PyLong_SHIFT;
+    }
+    // Digits from longest one only.
+    for (; i < size_a; i++) {
+        carry += a[i];
+        r[i] = carry & PyLong_MASK;
+        carry >>= PyLong_SHIFT;
+    }
+
+    // Only the top digit can be zero, so we can strip this faster.
+    if (carry) {
+        r[i] = carry;
+    } else {
+        // Note: Beware, this looses the sign value.
+        Pforge_LongSetDigitSizeAndNegative(result, Pforge_LongGetDigitSize(result) - 1, false);
+    }
+
+    return result;
+}
+
+static PyObject *_Pforge_LongAddInplaceDigits(PyObject *left, digit const *b, Py_ssize_t size_b) {
+    digit const *a = Pforge_LongGetDigitPointer(left);
+    Py_ssize_t size_a = Pforge_LongGetDigitSize(left);
+
+    digit const *aa = a;
+    digit const *bb = b;
+
+    // Make sure we know aa is the longest value by swapping a/b attributes.
+    if (size_a < size_b) {
+        {
+            aa = b;
+            bb = a;
+        }
+
+        {
+            Py_ssize_t temp = size_a;
+            size_a = size_b;
+            size_b = temp;
+        }
+    }
+
+    digit carry = 0;
+
+    // First common digits.
+    Py_ssize_t i;
+    for (i = 0; i < size_b; i++) {
+        carry += aa[i] + bb[i];
+        carry >>= PyLong_SHIFT;
+    }
+
+    // Digits from longest one only might cause a new digit through carry.
+    Py_ssize_t needed = size_a;
+
+    for (; i < size_a; i++) {
+        carry += aa[i];
+        carry >>= PyLong_SHIFT;
+
+        // No more carry, that means size cannot increase.
+        if (carry == 0) {
+            break;
+        }
+    }
+
+    // Final digit needs to be added.
+    if (carry) {
+        needed = i + 1;
+    }
+
+    // Need to keep the old value around, or else we commit use after free potentially.
+    PyObject *old = left;
+
+    if (needed > Pforge_LongGetDigitSize(left)) {
+        left = (PyObject *)Pforge_LongNew(needed);
+    } else {
+        Py_INCREF(old);
+    }
+
+    digit *r = Pforge_LongGetDigitPointer(left);
+
+    // Now do the real thing, with actual storage to left digits.
+    carry = 0;
+
+    // First common digits.
+    for (i = 0; i < size_b; i++) {
+        carry += aa[i] + bb[i];
+        r[i] = carry & PyLong_MASK;
+        carry >>= PyLong_SHIFT;
+    }
+    // Digits from longest one only.
+    for (; i < size_a; i++) {
+        carry += aa[i];
+        r[i] = carry & PyLong_MASK;
+        carry >>= PyLong_SHIFT;
+    }
+
+    // Final digit from the carry.
+    if (carry != 0) {
+        r[i] = carry;
+
+        Pforge_LongSetDigitSizeAndNegative((PyLongObject *)left, i + 1, false);
+    } else {
+        Pforge_LongSetDigitSizeAndNegative((PyLongObject *)left, i, false);
+    }
+
+    // Release reference to old value
+    Py_DECREF(old);
+
+    return left;
+}
+
+static PyLongObject *_Pforge_LongSubDigits(digit const *a, Py_ssize_t size_a, digit const *b, Py_ssize_t size_b) {
+    // Sign of the result.
+    int sign = 1;
+
+    // Make sure we know a is the largest value.
+    if (size_a < size_b) {
+        sign = -1;
+
+        {
+            digit const *temp = a;
+            a = b;
+            b = temp;
+        }
+
+        {
+            Py_ssize_t temp = size_a;
+            size_a = size_b;
+            size_b = temp;
+        }
+    } else if (size_a == size_b) {
+        // Find highest digit where a and b differ:
+        Py_ssize_t i = size_a;
+        while (--i >= 0 && a[i] == b[i]) {
+        }
+
+        if (i < 0) {
+#if PYTHON_VERSION < 0x300
+            return (PyLongObject *)Pforge_LongFromCLong(0);
+#else
+            // For Python3, we have this prepared.
+            PyObject *result = Pforge_Long_GetSmallValue(0);
+            Py_INCREF(result);
+            return (PyLongObject *)result;
+#endif
+        }
+
+        if (a[i] < b[i]) {
+            sign = -1;
+
+            {
+                digit const *temp = a;
+                a = b;
+                b = temp;
+            }
+        }
+
+        size_a = size_b = i + 1;
+    }
+
+    PyLongObject *result = Pforge_LongNew(size_a);
+    CHECK_OBJECT(result);
+
+    digit *r = Pforge_LongGetDigitPointer(result);
+
+    digit borrow = 0;
+
+    Py_ssize_t i;
+    // First common digits.
+    for (i = 0; i < size_b; i++) {
+        borrow = a[i] - b[i] - borrow;
+        r[i] = borrow & PyLong_MASK;
+        borrow >>= PyLong_SHIFT;
+        borrow &= 1;
+    }
+    // Digits from largest one only.
+    for (; i < size_a; i++) {
+        borrow = a[i] - borrow;
+        r[i] = borrow & PyLong_MASK;
+        borrow >>= PyLong_SHIFT;
+        borrow &= 1;
+    }
+    assert(borrow == 0);
+
+    // Strip leading zeros.
+    while (i > 0 && r[i - 1] == 0) {
+        i -= 1;
+    }
+
+    Pforge_LongSetDigitSizeAndNegative(result, i, sign < 0);
+
+#if PYTHON_VERSION >= 0x300
+    // Normalize small integers.
+    if (i <= 1) {
+        medium_result_value_t ival = MEDIUM_VALUE(result);
+
+        if (ival >= PFORGE_STATIC_SMALLINT_VALUE_MIN && ival < PFORGE_STATIC_SMALLINT_VALUE_MAX) {
+            Py_DECREF(result);
+
+            result = (PyLongObject *)Pforge_Long_GetSmallValue(ival);
+            Py_INCREF(result);
+        }
+    }
+#endif
+
+    return result;
+}
+
+static PyObject *_Pforge_LongSubInplaceDigits(PyObject *left, digit const *b, Py_ssize_t size_b, int sign) {
+    digit const *a = Pforge_LongGetDigitPointer(left);
+    Py_ssize_t size_a = Pforge_LongGetDigitSize(left);
+
+    digit const *aa = a;
+    digit const *bb = b;
+
+    // Make sure we know a is the largest value.
+    if (size_a < size_b) {
+        // Invert the sign of the result by swapping the order.
+        sign *= -1;
+
+        {
+            aa = b;
+            bb = a;
+        }
+
+        {
+            Py_ssize_t temp = size_a;
+            size_a = size_b;
+            size_b = temp;
+        }
+    } else if (size_a == size_b) {
+        // Find highest digit where a and b differ:
+        Py_ssize_t i = size_a;
+        while (--i >= 0 && a[i] == b[i]) {
+        }
+
+        // TODO: This will benefit a lot by being in a template.
+        if (i < 0) {
+#if PYTHON_VERSION < 0x300
+            PyObject *r = const_long_0;
+#else
+            PyObject *r = Pforge_Long_GetSmallValue(0);
+#endif
+            Py_INCREF(r);
+            Py_DECREF(left);
+
+            return r;
+        }
+
+        if (aa[i] < bb[i]) {
+            sign *= -1;
+
+            {
+                aa = b;
+                bb = a;
+            }
+        }
+
+        size_a = size_b = i + 1;
+    }
+
+    Py_ssize_t needed = size_a;
+
+    // Need to keep the old value around, or else we commit use after free potentially.
+    PyObject *old = left;
+
+    if (needed > Pforge_LongGetDigitSize(left)) {
+        left = (PyObject *)Pforge_LongNew(needed);
+    } else {
+        Py_INCREF(old);
+    }
+
+    digit *r = Pforge_LongGetDigitPointer(left);
+
+    digit borrow = 0;
+
+    Py_ssize_t i;
+    // First common digits.
+    for (i = 0; i < size_b; i++) {
+        borrow = aa[i] - bb[i] - borrow;
+        r[i] = borrow & PyLong_MASK;
+        borrow >>= PyLong_SHIFT;
+        borrow &= 1;
+    }
+    // Digits from largest one only.
+    for (; i < size_a; i++) {
+        borrow = aa[i] - borrow;
+        r[i] = borrow & PyLong_MASK;
+        borrow >>= PyLong_SHIFT;
+        borrow &= 1;
+    }
+    assert(borrow == 0);
+
+    // Strip leading zeros.
+    while (i > 0 && r[i - 1] == 0) {
+        i -= 1;
+    }
+
+    Pforge_LongSetDigitSizeAndNegative((PyLongObject *)left, i, (sign < 0));
+
+    // Release reference to old value
+    Py_DECREF(old);
+
+#if PYTHON_VERSION >= 0x300
+    // Normalize small integers.
+    if (i <= 1) {
+        medium_result_value_t ival = MEDIUM_VALUE(left);
+
+        if (ival >= PFORGE_STATIC_SMALLINT_VALUE_MIN && ival < PFORGE_STATIC_SMALLINT_VALUE_MAX) {
+            Py_DECREF(left);
+
+            left = Pforge_Long_GetSmallValue(ival);
+            Py_INCREF(left);
+        }
+    }
+#endif
+
+    return left;
+}
+
+//     Part of "Pforge", an optimizing Python compiler that is compatible and
+//     integrates with CPython, but also works on its own.
+//
+//     Licensed under the GNU Affero General Public License, Version 3 (the "License");
+//     you may not use this file except in compliance with the License.
+//     You may obtain a copy of the License at
+//
+//        https://www.gnu.org/licenses/agpl-3.0.txt
+//
+//     See also: "Pforge Runtime Library Exception, Version 1.0" in file
+//     "LICENSE-RUNTIME.txt" for additional permissions granted under Section 7.
+//
+//     Unless required by applicable law or agreed to in writing, software
+//     distributed under the License is distributed on an "AS IS" BASIS,
+//     WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+//     See the License for the specific language governing permissions and
+//     limitations under the License.

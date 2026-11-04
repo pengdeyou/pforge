@@ -1,0 +1,303 @@
+#!/usr/bin/env python
+#     Copyright 2026, Kay Hayen, mailto:kay.hayen@gmail.com find license text at end of file
+
+
+"""Main program for auto format tool."""
+
+from pforge.options.CommandLineOptionsTools import makeOptionsParser
+from pforge.Progress import enableProgressBar, wrapWithProgressBar
+from pforge.tools.quality.auto_format.AutoFormat import autoFormatFile
+from pforge.tools.quality.Git import (
+    addGitArguments,
+    getCheckoutFileChangeDesc,
+    getGitPaths,
+)
+from pforge.tools.quality.ScanSources import isPythonFile, scanTargets
+from pforge.Tracing import my_print, tools_logger
+from pforge.utils.FileOperations import resolveShellPatternToFilenames
+
+
+def _addOptions(parser):
+    parser.add_option(
+        "--verbose",
+        action="store_true",
+        dest="verbose",
+        default=False,
+        help="""Default is %default.""",
+    )
+
+    addGitArguments(parser, verb="Auto-format")
+
+    parser.add_option(
+        "--from-commit",
+        action="store_true",
+        dest="from_commit",
+        default=False,
+        help="""From commit hook, do not descend into directories. Default is %default.""",
+    )
+
+    parser.add_option(
+        "--check-only",
+        action="store_true",
+        dest="check_only",
+        default=False,
+        help="""For CI testing, check if it's properly formatted. Default is %default.""",
+    )
+
+    parser.add_option(
+        "--no-progressbar",
+        action="store_false",
+        dest="progress_bar",
+        default=True,
+        help="""Disable progress bar outputs (if tqdm is installed).
+Defaults to off.""",
+    )
+
+    parser.add_option(
+        "--assume-yes-for-downloads",
+        action="store_true",
+        dest="assume_yes_for_downloads",
+        default=False,
+        help="""Allow download and execution of tools if needed. Default is %default.""",
+    )
+
+    parser.add_option(
+        "--yaml",
+        action="store_true",
+        dest="yaml",
+        default=False,
+        help="""Format only matching Yaml files
+Defaults to off.""",
+    )
+
+    parser.add_option(
+        "--python",
+        action="store_true",
+        dest="python",
+        default=False,
+        help="""Format only matching Python files
+Defaults to off.""",
+    )
+
+    parser.add_option(
+        "--c",
+        action="store_true",
+        dest="c",
+        default=False,
+        help="""Format only matching C files
+Defaults to off.""",
+    )
+
+    parser.add_option(
+        "--rst",
+        action="store_true",
+        dest="rst",
+        default=False,
+        help="""Format only matching rst files
+Defaults to off.""",
+    )
+
+    parser.add_option(
+        "--md",
+        action="store_true",
+        dest="md",
+        default=False,
+        help="""Format only matching markdown files
+Defaults to off.""",
+    )
+
+    parser.add_option(
+        "--json",
+        action="store_true",
+        dest="json",
+        default=False,
+        help="""Format only matching JSON files
+Defaults to off.""",
+    )
+
+
+def _parseArgs():
+    parser = makeOptionsParser(usage=None, epilog=None)
+
+    _addOptions(parser)
+
+    options, positional_args = parser.parse_args()
+
+    if options.diff or options.un_pushed:
+        if options.from_commit:
+            return tools_logger.sysexit(
+                "Error, no --from-commit argument allowed in git diff mode."
+            )
+
+    if options.progress_bar:
+        enableProgressBar(progress_bar="auto")
+
+    return options, positional_args
+
+
+def formatFilenames(filenames, options):
+    result = 0
+
+    for filename in wrapWithProgressBar(
+        filenames,
+        stage="Check format" if options.check_only else "Auto format",
+        unit="file",
+    ):
+        try:
+            if autoFormatFile(
+                filename,
+                git_stage=False,
+                check_only=options.check_only,
+                assume_yes_for_downloads=options.assume_yes_for_downloads,
+            ):
+                result += 1
+        except Exception as e:
+            tools_logger.warning("Error formatting %s: %s" % (filename, e))
+            raise
+
+    # Tool is named without separator, spellchecker: ignore autoformat
+
+    if options.check_only and result > 0:
+        return tools_logger.sysexit(
+            """Error, 'bin/autoformat-pforge-source' would make changes to %d files, \
+make sure to have commit hook installed or run it manually.""" % result
+        )
+    elif result > 0:
+        tools_logger.info("autoformat: Changes to formatting of %d files" % result)
+    else:
+        tools_logger.info("autoformat: No files needed formatting changes.")
+
+
+def _filenameMatchesLimits(filename, options):
+    # pylint: disable=too-many-return-statements
+
+    if not (
+        options.yaml
+        or options.python
+        or options.c
+        or options.rst
+        or options.md
+        or options.json
+    ):
+        return True
+
+    if options.yaml and filename.endswith(".pforge-package.config.yml"):
+        return True
+    if options.c and (filename.endswith(".c") or filename.endswith(".h")):
+        return True
+    if options.python and isPythonFile(filename):
+        return True
+    if options.rst and (filename.endswith(".rst") or filename.endswith(".inc")):
+        return True
+    if options.md and filename.endswith(".md"):
+        return True
+    if options.json and filename.endswith(".json"):
+        return True
+
+    return False
+
+
+def _formatFromCommit(options):
+    for git_stage in getCheckoutFileChangeDesc(staged=True):
+        autoFormatFile(
+            git_stage["src_path"],
+            git_stage=git_stage,
+            assume_yes_for_downloads=options.assume_yes_for_downloads,
+        )
+
+
+def _formatFromGitPaths(options, positional_args):
+    positional_args = getGitPaths(
+        options=options,
+        positional_args=positional_args,
+        default_positional_args=(
+            "bin",
+            "lib",
+            "misc",
+            "pforge",
+            "rpm",
+            "setup.py",
+            "tests",
+            ".github",
+            ".agents",
+            "AGENTS.md",
+            "opencode.json",
+        ),
+    )
+
+    if not positional_args:
+        return tools_logger.sysexit("No files found.")
+
+    if options.check_only:
+        my_print("Checking:", ", ".join(positional_args))
+    else:
+        my_print("Working on:", ", ".join(positional_args))
+
+    positional_args = sum(
+        (
+            resolveShellPatternToFilenames(positional_arg)
+            for positional_arg in positional_args
+        ),
+        [],
+    )
+
+    filenames = list(
+        scanTargets(
+            positional_args,
+            suffixes=(
+                ".py",
+                ".scons",
+                ".rst",
+                ".txt",
+                ".j2",
+                ".md",
+                ".c",
+                ".h",
+                ".yml",
+                ".json",
+            ),
+        )
+    )
+
+    filenames = [
+        filename for filename in filenames if _filenameMatchesLimits(filename, options)
+    ]
+
+    if options.verbose:
+        my_print("Selected:", ", ".join(filenames))
+
+    if not filenames:
+        return tools_logger.sysexit("No files found.")
+
+    formatFilenames(filenames, options)
+
+
+def main():
+    options, positional_args = _parseArgs()
+
+    if options.from_commit:
+        _formatFromCommit(options)
+    else:
+        _formatFromGitPaths(options, positional_args)
+
+
+if __name__ == "__main__":
+    main()
+
+#     Part of "Pforge", an optimizing Python compiler that is compatible and
+#     integrates with CPython, but also works on its own.
+#
+#     Licensed under the GNU Affero General Public License, Version 3 (the "License");
+#     you may not use this file except in compliance with the License.
+#     You may obtain a copy of the License at
+#
+#        https://www.gnu.org/licenses/agpl-3.0.txt
+#
+#     See also: "Pforge Runtime Library Exception, Version 1.0" in file
+#     "LICENSE-RUNTIME.txt" for additional permissions granted under Section 7.
+#
+#     Unless required by applicable law or agreed to in writing, software
+#     distributed under the License is distributed on an "AS IS" BASIS,
+#     WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+#     See the License for the specific language governing permissions and
+#     limitations under the License.
