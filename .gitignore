@@ -81,6 +81,26 @@ venv_pforge/
 .vscode/.python_alias_path
 .clangd
 Pforge-*
+# These are part of the distribution, the pattern above is meant for
+# build artifacts only.
+!pforge/package_config/pforge-package-config-schema.json
+!doc/pforge-man-include.txt
+!doc/pforge-run.1
+!pforge/tools/release/rpm/pforge-rpmlintrc
+!bin/pforge-run
+!bin/pforge-watch
+!misc/pforge-completion.bash
+!misc/pforge-completion.zsh
+!misc/pforge-run.cmd
+!misc/pforge-completion.fish
+!misc/pforge-completion.ps1
+!misc/pforge.cmd
+!doc/Logo/Pforge-Logo-Horizontal.svg
+!doc/Logo/Pforge-Logo-Symbol.svg
+!doc/Logo/Pforge-Logo-Vertical.svg
+!doc/images/Pforge-Logo-Horizontal.png
+!doc/images/Pforge-Logo-Symbol.png
+!doc/images/Pforge-Logo-Vertical.png
 pforge/tools/podman/containers/requirements-devel.txt
 pforge/build/inline_copy/downloads
 

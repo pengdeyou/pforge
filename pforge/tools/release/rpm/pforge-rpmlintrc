@@ -1,0 +1,6 @@
+addFilter("pforge.*: devel-file-in-non-devel-package")
+addFilter("pforge.*: devel-dependency")
+
+addFilter("pforge.*: files-duplicate /usr/bin/pforge")
+addFilter("pforge.*: files-duplicate .*__init__.py")
+addFilter("pforge.*: files-duplicate .*/man1/")
