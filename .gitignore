@@ -19,6 +19,11 @@ __pycache__/
 *.exe.away
 *.cmd
 *.sh
+# The compile scripts are needed in the source distribution, they are
+# referenced by "setup.py" as scripts.
+!bin/compile-python-for-pforge-linux.sh
+!bin/compile-python-for-pforge-mac.sh
+!bin/compile-python-for-pforge-windows.cmd
 *.bin
 *.build
 *.onefile-build
